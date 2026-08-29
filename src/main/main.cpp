@@ -11,10 +11,18 @@
 
 #include "nfd.h"
 
+#ifdef __ANDROID__
+// No Android o main() é o SDL_main invocado pelo SDLActivity (System.loadLibrary("main")),
+// então NÃO definimos SDL_MAIN_HANDLED e usamos os argv injetados pelo getArguments().
+#include "SDL_main.h"
+#include "android_paths.h"
+#else
+#define SDL_MAIN_HANDLED
+#endif
+
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/config.hpp"
-#define SDL_MAIN_HANDLED
 #ifdef _WIN32
 #include "SDL.h"
 #else
@@ -207,7 +215,7 @@ bool SetImageAsIcon(const char* filename, SDL_Window* window)
             stbi_image_free(data);
         }
         return false;
-	} else {
+        } else {
         SDL_SetWindowIcon(window,surface);
         SDL_FreeSurface(surface);
         stbi_image_free(data);
@@ -680,8 +688,13 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
 
 int main(int argc, char** argv) {
+#ifdef __ANDROID__
+    // Diretórios do app passados pelo MainActivity (SDLActivity::getArguments()).
+    androidport::init_from_args(argc, argv);
+#else
     (void)argc;
     (void)argv;
+#endif
     recomp::Version project_version{};
     if (!recomp::Version::from_string(version_string, project_version)) {
         ultramodern::error_handling::message_box(("Invalid version string: " + version_string).c_str());
@@ -741,7 +754,7 @@ int main(int argc, char** argv) {
     SDL_setenv("SDL_AUDIODRIVER", "wasapi", true);
 #endif
 
-#if defined(__linux__) && defined(RECOMP_FLATPAK)
+#if defined(__linux__) && defined(RECOMP_FLATPAK) && !defined(__ANDROID__)
     // When using Flatpak, applications tend to launch from the home directory by default.
     // Mods might use the current working directory to store the data, so we switch it to a directory
     // with persistent data storage and write permissions under Flatpak to ensure it works.

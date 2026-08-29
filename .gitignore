@@ -72,3 +72,21 @@ gamecontrollerdb.txt
 # Just linux things
 build.log
 DK64Recompiled
+# ===== Port Android =====
+# Codegen gerado (host)
+rsp/n_aspMain.cpp
+patches/patches.bin
+patches/patches.map
+rom-input/
+rom-work/
+build-filetoc/
+N64RecompSource/
+# Gradle / AGP
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
