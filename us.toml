@@ -1,0 +1,62 @@
+# Config file for Donkey Kong 64 US Recompilation
+
+[input]
+entrypoint = 0x80000400
+# Paths are relative to the location of this config file.
+#elf_path = "donkeykong64.us.elf"
+symbols_file_path = "DK64Syms/dump.toml"
+rom_file_path = "donkeykong64.decompressed.us.z64"
+output_func_path = "RecompiledFuncs"
+
+manual_funcs = [
+    { name = "func_global_asm_80612794", section = ".global_asm", vram = 0x80612794, size = 0x6C }
+]
+function_sizes = [
+    { name = "func_global_asm_80612790", size = 0x70 },
+    { name = "func_global_asm_80612794", size = 0x6C },
+    { name = "func_global_asm_80612D10", size = 0x130}
+]
+
+[patches]
+
+ignored = [
+    "D_global_asm_80611F0C",
+    "D_global_asm_8071FA80",
+    "D_global_asm_8061ACA0",
+]
+
+[[patches.hook]]
+func = "func_dk64_boot_800005A8"
+text = """{
+    int32_t ovl_rom_start = 0x113F0;
+    int32_t ovl_ram = 0x805FB300;
+    int32_t uncompressed_size = 0x1DE360;
+    load_dk64_overlay(ovl_rom_start, ovl_ram, uncompressed_size);
+}"""
+before_vram = 0x80000734
+
+[[patches.hook]]
+func = "func_global_asm_8060B140"
+text = "load_dk64_overlay(ctx->r4, 0, 0);"
+before_vram = 0x8060B140
+
+#allocate 4 extra bytes per actor
+#[[patches.hook]]
+#func = "func_global_asm_80678050"
+#text = """ctx->r6 = ADD32(ctx->r6, 0x4);"""
+#before_vram = 0x806780D4
+
+#[[patches.instruction]]
+#func = "func_global_asm_80610350"
+#vram = 0x80610510
+#value = 0x3C0D8100 #lui $t5, hi(heap_end)
+
+#[[patches.instruction]]
+#func = "func_global_asm_80610350"
+#vram = 0x80610518
+#value = 0x35AD0000 #ori $t5, $t5 lo(heap_end)
+
+#[[patches.instruction]]
+#func = "func_global_asm_80610350"
+#vram = 0x80610564
+#value = 0x3C0F8080 #lui $t7, hi(heap_start)

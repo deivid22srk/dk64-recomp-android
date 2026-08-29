@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=DK64: Recompiled
+Exec=/app/bin/DK64Recompiled
+Type=Application
+Icon=io.github.dk64recompiled.dk64recompiled
+Categories=Game;
+Comment=Static recompilation of Donkey Kong 64 for PC.
+MimeType=x-scheme-handler/dk64recompiled
