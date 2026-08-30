@@ -63,6 +63,7 @@ cmake -S lib/rt64/src/tools/file_to_c -B build-filetoc -G Ninja && cmake --build
 
 # 2) APK
 git -C lib/rt64 apply ../../android/patches/rt64-android.patch
+git -C lib/rt64/src/contrib/plume apply ../../../../../android/patches/plume-android.patch
 git -C lib/RecompFrontend apply ../../android/patches/recompfrontend-android.patch
 cd android && ./gradlew assembleDebug -PHOST_FILE_TO_C="$PWD/../build-filetoc/file_to_c"
 ```

@@ -1,0 +1,85 @@
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+index 7ee84ed..f519425 100644
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -12,6 +12,8 @@
+ 
+ #if defined(_WIN32)
+ #include <Shlobj.h>
++#elif defined(__ANDROID__)
++#include "android_paths.h"
+ #elif defined(__linux__)
+ #include <unistd.h>
+ #include <pwd.h>
+@@ -20,6 +22,7 @@
+ #endif
+ 
+ namespace recompui {
++#ifndef __ANDROID__
+     static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
+         nfdnchar_t* native_path = nullptr;
+         nfdresult_t result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
+@@ -57,8 +60,15 @@ namespace recompui {
+ 
+         callback(success, paths);
+     }
++#endif
+ 
+     std::filesystem::path file::get_app_folder_path() {
++#if defined(__ANDROID__)
++        // Android: the app folder is the internal files directory (injected via
++        // argv by the SDL activity). The stored ROM, saves, config and mods all
++        // live under it.
++        return std::filesystem::path{androidport::internal_files_dir()};
++#else
+         // directly check for portable.txt (windows and native linux binary)
+         if (std::filesystem::exists("portable.txt")) {
+             return std::filesystem::current_path();
+@@ -112,10 +122,15 @@ namespace recompui {
+ #endif
+ 
+         return recomp_dir;
++#endif
+     }
+ 
+     std::filesystem::path file::get_program_path() {
+-#if defined(__APPLE__)
++#if defined(__ANDROID__)
++        // Android: APK assets are copied to <filesDir>/assets by the MainActivity
++        // and recompcontrollerdb.txt is placed directly in <filesDir>/.
++        return std::filesystem::path{androidport::internal_files_dir()};
++#elif defined(__APPLE__)
+         return file::apple::get_bundle_resource_directory();
+ #elif defined(__linux__) && defined(RECOMP_FLATPAK)
+         return "/app/bin";
+@@ -129,7 +144,17 @@ namespace recompui {
+     }
+ 
+     void file::open_file_dialog(std::function<void(bool success, const std::filesystem::path& path)> callback) {
+-#ifdef __APPLE__
++#if defined(__ANDROID__)
++        // Android: nfd has no Android backend, so look for a ROM in the app's
++        // known directories instead and invoke the callback synchronously.
++        std::string rom_path{};
++        if (androidport::find_rom_file(rom_path)) {
++            callback(true, std::filesystem::path{rom_path});
++        }
++        else {
++            callback(false, {});
++        }
++#elif defined(__APPLE__)
+         file::apple::dispatch_on_ui_thread([callback]() {
+             perform_file_dialog_operation(callback);
+         });
+@@ -139,7 +164,10 @@ namespace recompui {
+     }
+ 
+     void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
+-#ifdef __APPLE__
++#if defined(__ANDROID__)
++        // Android: multi-file selection is unsupported without a native dialog.
++        callback(false, {});
++#elif defined(__APPLE__)
+         file::apple::dispatch_on_ui_thread([callback]() {
+             perform_file_dialog_operation_multiple(callback);
+         });

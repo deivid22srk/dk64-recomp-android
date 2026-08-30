@@ -102,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           git -C lib/rt64 apply --verbose ../../android/patches/rt64-android.patch
+          git -C lib/rt64/src/contrib/plume apply --verbose ../../../../../android/patches/plume-android.patch
           git -C lib/RecompFrontend apply --verbose ../../android/patches/recompfrontend-android.patch
 
       - name: Build APK (Gradle + NDK)

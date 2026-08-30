@@ -46,6 +46,8 @@ list(APPEND CMAKE_PROGRAM_PATH "${HOST_TOOLS_DIR}")
 # ----------------------------------------------------------------------------
 set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
+# Shadow de variável normal: vence o FORCE do cmake_dependent_option do plume no Android
+set(PLUME_SDL_VULKAN_ENABLED TRUE)
 add_compile_definitions(
     HLSL_CPU
     FFX_GCC
@@ -159,6 +161,10 @@ foreach(_t rt64 recompui recompinput ultramodern librecomp)
         target_include_directories(${_t} PRIVATE ${SDL2_ALL_INCLUDES})
     endif()
 endforeach()
+# Patch do RecompFrontend (file.cpp) usa android_paths.h
+if(TARGET recompui)
+    target_include_directories(recompui PRIVATE "${ANDROID_PORT_DIR}/native/compat")
+endif()
 
 # ----------------------------------------------------------------------------
 # 6) Código recompilado (gerado no host antes deste build — ver CI)

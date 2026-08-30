@@ -1,0 +1,20 @@
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index 9dcfedf..a657973 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -37,10 +37,13 @@ namespace plume {
+ #if defined(_WIN64)
+     // Native HWND handle to the target window.
+     typedef HWND RenderWindow;
+-#elif defined(__ANDROID__)
+-    typedef ANativeWindow* RenderWindow;
++// Android com integracao SDL/Vulkan (port DK64-Recomp Android): a janela e uma
++// SDL_Window* criada pelo SDLActivity; os branches #elif defined(__ANDROID__)
++// (ANativeWindow*) so sao atingidos quando PLUME_SDL_VULKAN_ENABLED esta off.
+ #elif defined(PLUME_SDL_VULKAN_ENABLED)
+     typedef SDL_Window *RenderWindow;
++#elif defined(__ANDROID__)
++    typedef ANativeWindow* RenderWindow;
+ #elif defined(__linux__)
+     struct RenderWindow {
+         Display* display;
