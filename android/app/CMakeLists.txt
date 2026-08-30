@@ -65,7 +65,7 @@ add_compile_definitions(
 # __PRFCHWINTRIN_H: ver comentário do CMake raiz upstream (só afeta clang-cl, inofensivo aqui)
 
 # ----------------------------------------------------------------------------
-# 2) SDL2 2.30.3 (estático) — mesma versão do CI upstream
+# 2) SDL2 2.30.8 (estático) — série 2.30 do upstream com fix ALooper p/ NDK r27
 # ----------------------------------------------------------------------------
 include(FetchContent)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
@@ -74,9 +74,12 @@ set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+# SDL 2.30.8: igual à série 2.30 usada pelo upstream desktop, mas inclui a
+# correção oficial do ALooper_pollAll -> ALooper_pollOnce (obrigatória com
+# NDK r27; 2.30.3 falha ao compilar SDL_androidsensor.c no Android).
 FetchContent_Declare(sdl2
-    URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.tar.gz
-    URL_HASH SHA256=820440072f8f5b50188c1dae104f2ad25984de268785be40c41a099a510f0aec
+    URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.8/SDL2-2.30.8.tar.gz
+    URL_HASH SHA256=380c295ea76b9bd72d90075793971c8bcb232ba0a69a9b14da4ae8f603350058
 )
 FetchContent_MakeAvailable(sdl2)
 
