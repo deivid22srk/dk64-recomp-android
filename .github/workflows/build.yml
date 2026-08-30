@@ -1,0 +1,129 @@
+name: build
+
+# Build do APK Android a cada push (e manualmente via workflow_dispatch).
+# Fluxo: codegen no host (N64Recomp/RSPRecomp/patches com a ROM do release
+# `build-inputs`) -> Gradle + NDK -> APK debug assinado.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-\${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Init submódulos necessários (vcpkg não é usado no build Android)
+        run: |
+          set -euo pipefail
+          git submodule update --init --recursive --depth 1 \
+            lib/rt64 lib/N64ModernRuntime lib/RecompFrontend lib/dk64_decomp
+          git submodule status
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Dependências do host (ninja/clang/lld)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang lld llvm
+          clang --version | head -1
+          ld.lld --version
+
+      - name: Baixar ROM de input (release asset build-inputs) e validar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p rom-input
+          gh release download build-inputs --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Donkey.Kong.64.zip' --output rom-input/Donkey.Kong.64.zip --clobber
+          cd rom-input
+          unzip -o Donkey.Kong.64.zip
+          ROMS=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | wc -l)
+          if [ "$ROMS" -ne 1 ]; then
+            echo "::error::Esperava exatamente 1 ROM no zip, achei $ROMS"
+            exit 1
+          fi
+          ROM_FILE=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | head -1)
+          SHA1=$(sha1sum "$ROM_FILE" | cut -d' ' -f1)
+          echo "ROM sha1: $SHA1"
+          if [ "$SHA1" != "cf806ff2603640a748fca5026ded28802f1f4a50" ]; then
+            echo "::error::ROM incorreta (esperado NTSC-U 1.0, sha1 cf806ff2...)"
+            exit 1
+          fi
+
+      - name: Build N64Recomp & RSPRecomp (host)
+        run: |
+          set -euo pipefail
+          git clone https://github.com/N64Recomp/N64Recomp.git --recurse-submodules N64RecompSource
+          cd N64RecompSource
+          git checkout 2b6f05688de2abc7d86da5b4a89b84c2c6acbabe
+          git submodule update --init --recursive
+          cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build
+          cmake --build cmake-build --target N64RecompCLI RSPRecomp -j $(nproc)
+          cp cmake-build/N64Recomp cmake-build/RSPRecomp ..
+
+      - name: Descomprimir a ROM (script do dk64_decomp)
+        run: |
+          set -euo pipefail
+          mkdir -p rom-work
+          cp rom-input/*.z64 rom-work/baserom.us.z64
+          ( cd rom-work && python3 ../lib/dk64_decomp/tools/generate_decompressed_rom.py )
+          cp rom-work/baserom.us.decompressed.z64 donkeykong64.decompressed.us.z64
+          ls -la donkeykong64.decompressed.us.z64
+
+      - name: Codegen (N64Recomp us.toml + RSPRecomp + patches)
+        run: |
+          set -euo pipefail
+          ./N64Recomp us.toml
+          ./RSPRecomp n_aspMain.toml
+          make -C patches CC=clang LD=ld.lld
+          ./N64Recomp patches.toml
+          ls RecompiledFuncs | head -3
+          ls RecompiledPatches
+          ls rsp/n_aspMain.cpp
+
+      - name: Build file_to_c (host tool)
+        run: |
+          set -euo pipefail
+          cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S lib/rt64/src/tools/file_to_c -B build-filetoc
+          cmake --build build-filetoc -j $(nproc)
+          ./build-filetoc/file_to_c --help >/dev/null 2>&1 || true
+
+      - name: Aplicar patches de port nos submódulos
+        run: |
+          set -euo pipefail
+          git -C lib/rt64 apply --verbose ../../android/patches/rt64-android.patch
+          git -C lib/rt64/src/contrib/plume apply --verbose ../../../../../android/patches/plume-android.patch
+          git -C lib/RecompFrontend apply --verbose ../../android/patches/recompfrontend-android.patch
+
+      - name: Build APK (Gradle + NDK)
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -PHOST_FILE_TO_C="$GITHUB_WORKSPACE/build-filetoc/file_to_c"
+
+      - name: Upload do APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dk64recomp-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
