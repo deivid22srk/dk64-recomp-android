@@ -872,10 +872,22 @@ public class SetupActivity extends Activity {
         if (mDriverStatus == null) return;
         DriverMeta sel = readSelectedDriver();
         if (sel != null) {
+            // Diagnóstico: a seleção vive em files/driver/selected.txt e os
+            // arquivos em files/driver/installed/<id>/. O selected.txt sobrevive
+            // a saída/relaunch do app (persiste no filesDir), mas se os ARQUIVOS
+            // sumirem (limpeza de dados parcial, root, etc.) o nativo cairia no
+            // driver do sistema em silêncio — mostramos isso explicitamente.
+            boolean filesOk = new File(sel.dir, sel.library).isFile();
+            Log.i(TAG, "Driver selecionado: " + sel.name + " (" + sel.library
+                    + ") em " + sel.dir + " | arquivos="
+                    + (filesOk ? "OK" : "AUSENTES"));
             mDriverStatus.setText("Ativo: " + sel.name + " (" + sel.library + ")\n"
-                    + "Aplicado ao iniciar o jogo. Toque em Remover para voltar ao driver do sistema.");
+                    + (filesOk
+                            ? "Aplicado ao iniciar o jogo. Toque em Remover para voltar ao driver do sistema."
+                            : "Os arquivos do driver não foram encontrados — instale o .zip novamente."));
             mDriverRemoveButton.setEnabled(true);
         } else {
+            Log.i(TAG, "Driver: nenhum selecionado (selected.txt ausente)");
             mDriverStatus.setText("Usando o driver do sistema (padrão).");
             mDriverRemoveButton.setEnabled(false);
         }

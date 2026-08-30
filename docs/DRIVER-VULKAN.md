@@ -433,6 +433,25 @@ Sucesso: `custom driver: '...' ativo (via adrenotools)` seguido de
 `custom driver: '...' DESCARTADO — probe não expôs GPU Vulkan (...)`.
 Falhas do RT64/plume aparecem na tag `DK64Recomp-stderr`.
 
+### 4.1 A seleção sobrevive a sair/reabrir o jogo?
+
+Sim. A seleção vive em `filesDir/driver/selected.txt` e os arquivos em
+`filesDir/driver/installed/<id>/` — ambos persistem no armazenamento do app
+(sobrevivem a fechar o app, reabrir, e até a atualizações do APK). O Setup
+mostra o estado real a cada abertura ("Ativo: ..." ou "Usando o driver do
+sistema") e agora também sinaliza se os ARQUIVOS do driver sumiram.
+
+Um detalhe de ciclo de vida importa aqui e foi corrigido: sair do jogo
+(menu Exit) apenas encerra o `SDL_main` e a Activity — o PROCESSO Android
+ficava vivo (cacheado), e reabrir o jogo rodava um 2º `SDL_main` no MESMO
+processo, com os estáticos do runtime sujos (`ultramodern::exited` ainda
+`true` — o loop principal nem executava; `game_status=Quit`; contexto
+RT64/RmlUi do run anterior). O sintoma era "sair do jogo e entrar
+novamente não carrega / perde o driver". Hoje `MainActivity.onDestroy`
+(fim do jogo) encerra o processo: **todo relaunch nasce limpo** — estáticos
+zerados e o driver é recarregado do zero a partir de `selected.txt`
+(`custom driver: carregando '...'` no logcat a cada início).
+
 ## 5. Limitações conhecidas
 
 - Somente **Adreno** em **arm64-v8a** — Turnip não existe para Mali/PowerVR;

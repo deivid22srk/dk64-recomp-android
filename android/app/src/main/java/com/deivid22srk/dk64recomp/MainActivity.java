@@ -67,6 +67,37 @@ public class MainActivity extends SDLActivity {
         }
     }
 
+    /**
+     * SAÍDA DO JOGO = FIM DO PROCESSO.
+     *
+     * O jogo sai pelo menu Exit -> ultramodern::quit() seta o ESTÁTICO
+     * `exited` (librecomp/recomp.cpp) -> SDL_main retorna -> SDLThread chama
+     * mSingleton.finish() (SDLActivity.java ~L1891). O SDLActivity encerra a
+     * própria thread e o SDL (nativeQuit -> SDL_Quit), mas o PROCESSO fica
+     * vivo (apenas cacheado pelo sistema). Um 2º SDL_main no mesmo processo —
+     * exatamente o que acontece ao sair do jogo e reabrir o app — nasce com
+     * TODOS os estáticos do runtime sujos: `exited` ainda é true (o loop
+     * principal `while (!exited)` nem executa), game_status=Quit, contexto
+     * RT64/RmlUi do run anterior, g_state do driver Vulkan... O sintoma é o
+     * relato do usuário: "sair do jogo e entrar novamente não carrega".
+     *
+     * Encerrar o processo aqui torna CADA relaunch um processo novo:
+     * estáticos zerados, driver recarregado do zero a partir de
+     * files/driver/selected.txt, probe rerodado. É o comportamento padrão de
+     * ports SDL no Android (a Activity é destruída apenas em finish() do fim
+     * do jogo, back na raiz da task, ou swipe em recents — a orientação é
+     * fixa e configChanges cobre rotações/teclado, então isFinishing() aqui
+     * significa "fim de jogo", nunca recriação de configuração).
+     */
+    @Override
+    public void onDestroy() {
+        Log.i(TAG, "MainActivity.onDestroy (isFinishing=" + isFinishing() + ")");
+        super.onDestroy();
+        if (isFinishing()) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
+
     @Override
     protected String[] getLibraries() {
         // SDL2 é linkado estaticamente dentro de libmain.so (ver app/CMakeLists.txt).
