@@ -1,31 +1,13 @@
 diff --git a/lib/dictBuilder/cover.c b/lib/dictBuilder/cover.c
-index 386a4d5..2f1e077 100644
+index 386a4d5..6035323 100644
 --- a/lib/dictBuilder/cover.c
 +++ b/lib/dictBuilder/cover.c
-@@ -290,7 +290,7 @@ static int COVER_cmp8(COVER_ctx_t *ctx, const void *lp, const void *rp) {
-  */
- #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
- static int WIN_CDECL COVER_strict_cmp(void* g_coverCtx, const void* lp, const void* rp) {
--#elif defined(_GNU_SOURCE)
-+#elif defined(_GNU_SOURCE) && !defined(__ANDROID__) /* Android port: bionic < API 28 sem qsort_r; usa fallback C90 */
- static int COVER_strict_cmp(const void *lp, const void *rp, void *g_coverCtx) {
- #else /* C90 fallback.*/
- static int COVER_strict_cmp(const void *lp, const void *rp) {
-@@ -306,7 +306,7 @@ static int COVER_strict_cmp(const void *lp, const void *rp) {
-  */
- #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
- static int WIN_CDECL COVER_strict_cmp8(void* g_coverCtx, const void* lp, const void* rp) {
--#elif defined(_GNU_SOURCE)
-+#elif defined(_GNU_SOURCE) && !defined(__ANDROID__) /* Android port */
- static int COVER_strict_cmp8(const void *lp, const void *rp, void *g_coverCtx) {
- #else /* C90 fallback.*/
- static int COVER_strict_cmp8(const void *lp, const void *rp) {
-@@ -328,7 +328,7 @@ static void stableSort(COVER_ctx_t *ctx) {
-     qsort_r(ctx->suffix, ctx->suffixSize, sizeof(U32),
-             ctx,
-             (ctx->d <= 8 ? &COVER_strict_cmp8 : &COVER_strict_cmp));
--#elif defined(_GNU_SOURCE)
-+#elif defined(_GNU_SOURCE) && !defined(__ANDROID__) /* Android port */
-     qsort_r(ctx->suffix, ctx->suffixSize, sizeof(U32),
-             (ctx->d <= 8 ? &COVER_strict_cmp8 : &COVER_strict_cmp),
-             ctx);
+@@ -241,7 +241,7 @@ typedef struct {
+   unsigned d;
+ } COVER_ctx_t;
+ 
+-#if !defined(_GNU_SOURCE) && !defined(__APPLE__) && !defined(_MSC_VER)
++#if (!defined(_GNU_SOURCE) || defined(__ANDROID__)) && !defined(__APPLE__) && !defined(_MSC_VER) /* Android port: fallback C90 usa qsort + global */
+ /* C90 only offers qsort() that needs a global context. */
+ static COVER_ctx_t *g_coverCtx = NULL;
+ #endif
