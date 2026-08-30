@@ -17,6 +17,10 @@ typedef enum {
 extern RecompCameraMode recomp_camera_mode;
 extern RecompAimingOverideMode recomp_aiming_override_mode;
 
+// Port DK64-Recomp Android: publica o estado do jogo à camada de toque
+// nativa (chamado por patches/patches_touch.c uma vez por frame).
+DECLARE_FUNC(void, recomp_touch_frame_state);
+
 DECLARE_FUNC(void, recomp_get_gyro_deltas, float* x, float* y);
 DECLARE_FUNC(void, recomp_get_mouse_deltas, float* x, float* y);
 DECLARE_FUNC(void, recomp_get_inverted_axes, s32* x, s32* y);
