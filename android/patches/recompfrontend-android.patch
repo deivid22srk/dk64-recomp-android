@@ -17,7 +17,7 @@ index 467c01b..114d42c 100644
  #endif
  
 diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
-index 7ee84ed..e2c29ea 100644
+index 7ee84ed..9952b10 100644
 --- a/recompui/src/util/file.cpp
 +++ b/recompui/src/util/file.cpp
 @@ -12,6 +12,8 @@
@@ -47,9 +47,12 @@ index 7ee84ed..e2c29ea 100644
      static void perform_file_dialog_operation_multiple(const std::function<void(bool, const std::list<std::filesystem::path>&)>& callback) {
          const nfdpathset_t* native_paths = nullptr;
          nfdresult_t result = NFD_OpenDialogMultipleN(&native_paths, nullptr, 0, nullptr);
-@@ -59,6 +65,10 @@ namespace recompui {
+@@ -58,7 +64,13 @@ namespace recompui {
+         callback(success, paths);
      }
  
++#endif /* !__ANDROID__ */
++
      std::filesystem::path file::get_app_folder_path() {
 +#if defined(__ANDROID__)
 +        // Port Android: config (ROM armazenada, saves, mods, config) no filesDir.
@@ -58,7 +61,7 @@ index 7ee84ed..e2c29ea 100644
          // directly check for portable.txt (windows and native linux binary)
          if (std::filesystem::exists("portable.txt")) {
              return std::filesystem::current_path();
-@@ -112,10 +122,14 @@ namespace recompui {
+@@ -112,10 +124,14 @@ namespace recompui {
  #endif
  
          return recomp_dir;
@@ -74,7 +77,7 @@ index 7ee84ed..e2c29ea 100644
          return file::apple::get_bundle_resource_directory();
  #elif defined(__linux__) && defined(RECOMP_FLATPAK)
          return "/app/bin";
-@@ -129,7 +143,13 @@ namespace recompui {
+@@ -129,7 +145,13 @@ namespace recompui {
      }
  
      void file::open_file_dialog(std::function<void(bool success, const std::filesystem::path& path)> callback) {
@@ -89,7 +92,7 @@ index 7ee84ed..e2c29ea 100644
          file::apple::dispatch_on_ui_thread([callback]() {
              perform_file_dialog_operation(callback);
          });
-@@ -139,7 +159,9 @@ namespace recompui {
+@@ -139,7 +161,9 @@ namespace recompui {
      }
  
      void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
