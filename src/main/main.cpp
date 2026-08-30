@@ -242,6 +242,18 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
         exit_error("Failed to create window: %s\n", SDL_GetError());
     }
 
+#if defined(__ANDROID__)
+    // Port DK64-Recomp Android: tela cheia imersiva. Sem isto o SDLActivity
+    // mantém a status bar e os insets de corte/gesto reservados e o swapchain
+    // nasce menor que a tela (barras pretas nas laterais, menu não preenche o
+    // display 20:9). SDL_WINDOW_FULLSCREEN_DESKTOP faz o SDLActivity nativo
+    // aplicar SYSTEM_UI_FLAG_IMMERSIVE_STICKY (COMMAND_CHANGE_WINDOW_STYLE ->
+    // setWindowStyle) e re-hidratar as barras automaticamente (rehideSystemUi)
+    // quando o usuário desliza a borda. O MainActivity complementa com
+    // layoutInDisplayCutoutMode=SHORT_EDGES (recorte da câmera em paisagem).
+    SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+#endif
+
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);

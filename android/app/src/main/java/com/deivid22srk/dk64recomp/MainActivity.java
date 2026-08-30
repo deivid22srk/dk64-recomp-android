@@ -1,7 +1,10 @@
 package com.deivid22srk.dk64recomp;
 
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.View;
+import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
 
@@ -20,6 +23,13 @@ import java.io.File;
  *
  * Fluxo nativo: SDLMain.run -> nativeRunMain -> SDL_main (src/main/main.cpp),
  * que consome os diretórios via androidport::init_from_args(argc, argv).
+ *
+ * Tela cheia: o nativo pede SDL_WINDOW_FULLSCREEN_DESKTOP (create_window),
+ * que ativa o imersivo sticky do SDLActivity; aqui complementamos com
+ * layoutInDisplayCutoutMode=SHORT_EDGES (o furo de câmera em paisagem fica
+ * nas laterais — sem isto o Android reserva faixas pretas de ~4 mm em cada
+ * borda e o swapchain nasce menor que o display) e reafirmamos as flags
+ * imersivas a cada ganho de foco (teclas deslizantes do Android 15).
  */
 public class MainActivity extends SDLActivity {
 
@@ -29,6 +39,32 @@ public class MainActivity extends SDLActivity {
     protected void onCreate(Bundle savedInstanceState) {
         Log.i(TAG, "MainActivity.onCreate -> iniciando fluxo SDL");
         super.onCreate(savedInstanceState);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams attrs = getWindow().getAttributes();
+            // SHORT_EDGES: permite que o conteúdo se estenda pela área do
+            // recorte da câmera em qualquer orientação (combinado com o
+            // imersivo, remove as barras pretas laterais em displays 20:9).
+            attrs.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(attrs);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        // SEMPRE chamar o super: SDLActivity usa este ponto para
+        // nativeFocusChanged() (pausa/retoma do loop de render).
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            View decor = getWindow().getDecorView();
+            decor.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     @Override
