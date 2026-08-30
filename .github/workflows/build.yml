@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           git submodule update --init --recursive --depth 1 \
-            lib/rt64 lib/N64ModernRuntime lib/RecompFrontend lib/dk64_decomp
+            lib/rt64 lib/N64ModernRuntime lib/RecompFrontend lib/dk64_decomp lib/adrenotools
           git submodule status
 
       - name: Setup Java 17
@@ -126,6 +126,20 @@ jobs:
           cd android
           ./gradlew assembleDebug --no-daemon --stacktrace \
             -PHOST_FILE_TO_C="$GITHUB_WORKSPACE/build-filetoc/file_to_c"
+
+      - name: Verificar conteúdo do APK (hooks do adrenotools empacotados)
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -l "$APK" > /tmp/apk-list.txt
+          cat /tmp/apk-list.txt
+          for lib in libmain.so libmain_hook.so libhook_impl.so libfile_redirect_hook.so; do
+            if ! grep -q "lib/arm64-v8a/$lib" /tmp/apk-list.txt; then
+              echo "::error::$lib ausente do APK — hooks do adrenotools não foram empacotados"
+              exit 1
+            fi
+          done
+          echo "APK OK: libmain.so + hooks do adrenotools presentes"
 
       - name: Upload do APK
         uses: actions/upload-artifact@v4

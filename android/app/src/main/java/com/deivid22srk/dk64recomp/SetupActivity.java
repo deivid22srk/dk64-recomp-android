@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -17,12 +18,16 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 /**
  * Port Android do DK64: Recompiled — tela de preparação (launcher).
@@ -33,10 +38,17 @@ import java.io.OutputStream;
  *     (marcador .assets_version): assets/<nome> + recompcontrollerdb.txt na raiz.
  *  3. Garantir uma ROM (.z64/.n64/.v64): scan de filesDir/externalFilesDir
  *     ou seleção via SAF (ACTION_OPEN_DOCUMENT) com cópia para o app.
- *  4. Quando tudo pronto -> startActivity(MainActivity) + finish().
+ *  4. Quando tudo pronto -> botão INICIAR JOGO -> startActivity(MainActivity).
  *
  * Assim o MainActivity (SDLActivity) nunca inicia sem ROM/assets e não
  * precisamos de recreate() nem de manipular estado estático do SDL.
+ *
+ * Driver Vulkan custom (Turnip): o usuário pode instalar um driver .zip
+ * (formato adrenotools — meta.json + vulkan.ad*.so, ex. K11MCH1/AdrenoToolsDrivers)
+ * aqui no Setup. O zip é extraído para filesDir/driver/installed/<id>/ e a
+ * seleção gravada em filesDir/driver/selected.txt (KEY=VALUE), lida pelo nativo
+ * (custom_driver.cpp) no início do SDL_main — por isso o início do jogo agora é
+ * manual (botão INICIAR JOGO), garantindo acesso a esta tela em todo launch.
  */
 public class SetupActivity extends Activity {
 
@@ -44,13 +56,22 @@ public class SetupActivity extends Activity {
     private static final String ASSETS_VERSION_MARKER = ".assets_version";
     private static final String ASSETS_VERSION = "1";
     private static final int PICK_ROM_REQUEST = 0xD864;
+    private static final int PICK_DRIVER_REQUEST = 0xADF1;
     private static final long MAX_ROM_BYTES = 64L * 1024 * 1024; // ROM NTSC-U: 32 MiB
+    // Limites anti zip-bomb para o driver (zips reais: ~1 .so de 13-20 MB + meta.json)
+    private static final long MAX_DRIVER_ZIP_BYTES = 512L * 1024 * 1024;
+    private static final int MAX_DRIVER_ENTRIES = 128;
 
     private TextView mStatus;
     private Button mPickButton;
+    private TextView mDriverStatus;
+    private Button mDriverInstallButton;
+    private Button mDriverRemoveButton;
+    private Button mStartButton;
 
     private volatile boolean mAssetCopyRunning;
     private volatile boolean mRomCopyRunning;
+    private volatile boolean mDriverWorkRunning;
     private boolean mVulkanDialogShown;
     private boolean mVulkanAcknowledged;
     private boolean mHandedOff;
@@ -72,7 +93,7 @@ public class SetupActivity extends Activity {
         if (!mVulkanDialogShown && !vulkanOk()) {
             showVulkanWarning();
         }
-        maybeHandOff();
+        updateStartState();
     }
 
     // ------------------------------------------------------------------
@@ -119,6 +140,60 @@ public class SetupActivity extends Activity {
         root.addView(mPickButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // --------------------------------------------------------------
+        // Driver Vulkan custom (Turnip via adrenotools) — opcional
+        // --------------------------------------------------------------
+        TextView driverTitle = new TextView(this);
+        driverTitle.setText("Driver Vulkan (opcional)");
+        driverTitle.setTextSize(16f);
+        driverTitle.setTextColor(Color.rgb(0xF7, 0xD3, 0x3B));
+        driverTitle.setPadding(0, 48, 0, 8);
+        root.addView(driverTitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView driverHint = new TextView(this);
+        driverHint.setText("Em alguns dispositivos o driver proprietário Adreno tem bugs "
+                + "(ex.: crash em vkGetRefreshCycleDurationGOOGLE). Um driver Turnip "
+                + "(Mesa) pode corrigir. Formato: .zip adrenotools (meta.json + vulkan.ad*.so), "
+                + "ex.: K11MCH1/AdrenoToolsDrivers no GitHub. Requer arm64 + Android 10+.");
+        driverHint.setTextSize(12f);
+        driverHint.setTextColor(Color.rgb(0xD8, 0xD8, 0xD8));
+        root.addView(driverHint, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mDriverStatus = new TextView(this);
+        mDriverStatus.setTextSize(13f);
+        mDriverStatus.setTextColor(Color.WHITE);
+        mDriverStatus.setPadding(0, 12, 0, 12);
+        root.addView(mDriverStatus, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mDriverInstallButton = new Button(this);
+        mDriverInstallButton.setText("Instalar driver (.zip)…");
+        mDriverInstallButton.setOnClickListener(v -> startDriverPicker());
+        root.addView(mDriverInstallButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mDriverRemoveButton = new Button(this);
+        mDriverRemoveButton.setText("Remover driver (voltar ao sistema)");
+        mDriverRemoveButton.setOnClickListener(v -> removeDriver());
+        root.addView(mDriverRemoveButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // --------------------------------------------------------------
+        // Início manual: garante acesso a esta tela (ROM/driver) em todo launch
+        // --------------------------------------------------------------
+        mStartButton = new Button(this);
+        mStartButton.setText("INICIAR JOGO ▶");
+        mStartButton.setTextSize(18f);
+        mStartButton.setEnabled(false);
+        mStartButton.setOnClickListener(v -> startGame());
+        LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        startParams.topMargin = 40;
+        root.addView(mStartButton, startParams);
+
+        refreshDriverStatus();
         setContentView(root);
     }
 
@@ -144,7 +219,7 @@ public class SetupActivity extends Activity {
                         + "Você ainda pode tentar executar o jogo.")
                 .setPositiveButton("Continuar mesmo assim", (d, w) -> {
                     mVulkanAcknowledged = true;
-                    maybeHandOff();
+                    updateStartState();
                 })
                 .setNegativeButton("Sair", (d, w) -> finish())
                 .setCancelable(false)
@@ -169,17 +244,22 @@ public class SetupActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // Handoff para o SDL (MainActivity)
+    // Handoff para o SDL (MainActivity) — agora MANUAL via INICIAR JOGO
     // ------------------------------------------------------------------
 
-    private void maybeHandOff() {
+    /** Habilita o botão de início quando ROM + assets estiverem prontos. */
+    private void updateStartState() {
+        if (mStartButton == null) return;
+        boolean ready = !mRomCopyRunning && !mAssetCopyRunning && assetsReady() && findRom() != null;
+        if (ready && !mVulkanAcknowledged && !vulkanOk()) ready = false;
+        mStartButton.setEnabled(ready);
+        if (ready) {
+            mStatus.setText("Tudo pronto — toque em INICIAR JOGO");
+        }
+    }
+
+    private void startGame() {
         if (mHandedOff || isFinishing() || isDestroyed()) return;
-        if (mRomCopyRunning || mAssetCopyRunning) return;
-        if (!mVulkanAcknowledged && !vulkanOk()) return;
-
-        if (!assetsReady()) return; // retry: startAssetCopyIfNeeded roda em onCreate/onResume
-        if (findRom() == null) return;
-
         mHandedOff = true;
         Log.i(TAG, "Setup completo -> MainActivity (SDL)");
         startActivity(new Intent(this, MainActivity.class));
@@ -193,11 +273,17 @@ public class SetupActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_ROM_REQUEST || resultCode != Activity.RESULT_OK
-                || data == null || data.getData() == null) {
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
             return;
         }
-        Uri uri = data.getData();
+        if (requestCode == PICK_ROM_REQUEST) {
+            handleRomPicked(data.getData());
+        } else if (requestCode == PICK_DRIVER_REQUEST) {
+            handleDriverPicked(data.getData());
+        }
+    }
+
+    private void handleRomPicked(Uri uri) {
         String name = queryDisplayName(uri);
         if (name == null) name = "rom.z64";
         name = name.substring(name.lastIndexOf('/') + 1).trim();
@@ -231,7 +317,7 @@ public class SetupActivity extends Activity {
                 mPickButton.setEnabled(true);
                 setStatus(finalError != null ? finalError : "");
                 if (finalError != null) toast(finalError);
-                maybeHandOff();
+                updateStartState();
             });
         }, "dk64-rom-copy").start();
     }
@@ -312,6 +398,289 @@ public class SetupActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
+    // Driver Vulkan custom (Turnip via adrenotools)
+    //
+    // Formato do zip (ecossistema adrenotools): meta.json + o .so do driver
+    // (campo "libraryName"/"library" do meta). Os arquivos podem estar na raiz
+    // ou num subdiretório — usamos o diretório do meta.json como raiz.
+    // O nativo (custom_driver.cpp) lê filesDir/driver/selected.txt e carrega o
+    // driver via adrenotools_open_libvulkan() no início do SDL_main.
+    // ------------------------------------------------------------------
+
+    private static final String DRIVER_BASE = "driver";              // filesDir/driver
+    private static final String DRIVER_SELECTED = "selected.txt";    // filesDir/driver/selected.txt
+    private static final String DRIVER_INSTALLED = "installed";      // filesDir/driver/installed/<id>/
+
+    private static final class DriverMeta {
+        String name;
+        String library;
+        String dir;
+    }
+
+    private void startDriverPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*"); // zips podem chegar como application/zip ou octet-stream
+        startActivityForResult(intent, PICK_DRIVER_REQUEST);
+    }
+
+    private void handleDriverPicked(Uri uri) {
+        if (mDriverWorkRunning) return;
+        String name = queryDisplayName(uri);
+        if (name == null) name = "driver.zip";
+        name = name.substring(name.lastIndexOf('/') + 1).trim();
+        String lower = name.toLowerCase();
+        if (!lower.endsWith(".zip")) {
+            toast("Selecione um .zip de driver (formato adrenotools, ex.: Turnip).");
+            return;
+        }
+        installDriverAsync(uri, name);
+    }
+
+    private void installDriverAsync(Uri uri, final String displayName) {
+        mDriverWorkRunning = true;
+        setDriverButtonsEnabled(false);
+        setDriverStatus("Instalando driver…");
+        new Thread(() -> {
+            String error = null;
+            try {
+                DriverMeta meta = installDriver(uri, displayName);
+                Log.i(TAG, "Driver instalado: " + meta.name + " (" + meta.library + ") em " + meta.dir);
+            } catch (Exception ex) {
+                Log.e(TAG, "Falha ao instalar driver", ex);
+                error = "Falha ao instalar driver: " + ex.getMessage();
+            }
+            final String finalError = error;
+            runOnUiThread(() -> {
+                mDriverWorkRunning = false;
+                setDriverButtonsEnabled(true);
+                refreshDriverStatus();
+                if (finalError != null) {
+                    toast(finalError);
+                } else {
+                    toast("Driver instalado! Ele será usado ao iniciar o jogo.");
+                }
+            });
+        }, "dk64-driver-install").start();
+    }
+
+    private void setDriverButtonsEnabled(boolean enabled) {
+        if (mDriverInstallButton != null) mDriverInstallButton.setEnabled(enabled);
+        if (mDriverRemoveButton != null) mDriverRemoveButton.setEnabled(enabled);
+    }
+
+    private void setDriverStatus(String text) {
+        if (mDriverStatus != null) mDriverStatus.setText(text);
+    }
+
+    /** Extrai, valida e seleciona o driver. Lança Exception com mensagem amigável. */
+    private DriverMeta installDriver(Uri uri, String displayName) throws Exception {
+        File base = new File(getFilesDir(), DRIVER_BASE);
+        File installedRoot = new File(base, DRIVER_INSTALLED);
+        if (!installedRoot.isDirectory() && !installedRoot.mkdirs()) {
+            throw new IOException("não foi possível criar " + installedRoot);
+        }
+
+        String id = sanitizeId(displayName) + "-" + Long.toString(System.currentTimeMillis(), 36);
+        File target = new File(installedRoot, id);
+        if (!target.isDirectory() && !target.mkdirs()) {
+            throw new IOException("não foi possível criar " + target);
+        }
+
+        String prefix;
+        JSONObject meta;
+        try {
+            // 1ª passada: localizar meta.json e ler o JSON
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new IOException("não foi possível abrir o arquivo");
+                Object[] found = findMetaJson(in);
+                if (found == null) {
+                    throw new IOException("meta.json não encontrado no zip (formato adrenotools?)");
+                }
+                prefix = (String) found[0];
+                meta = new JSONObject((String) found[1]);
+            }
+
+            String library = meta.optString("libraryName", meta.optString("library", ""));
+            if (library.isEmpty()) {
+                throw new IOException("meta.json sem campo libraryName/library");
+            }
+            int minApi = meta.optInt("minApi", 0);
+            if (minApi > Build.VERSION.SDK_INT) {
+                throw new IOException("driver exige Android " + minApi + "+ (este device: "
+                        + Build.VERSION.SDK_INT + ")");
+            }
+
+            // 2ª passada: extrair tudo que está sob o prefixo do meta.json
+            extractZipUnderPrefix(uri, prefix, target);
+
+            File libFile = new File(target, library);
+            if (!libFile.isFile() || libFile.length() == 0) {
+                throw new IOException(".so do driver ('" + library + "') não veio no zip");
+            }
+
+            DriverMeta out = new DriverMeta();
+            out.dir = target.getAbsolutePath();
+            out.library = library;
+            out.name = meta.optString("name", !meta.optString("driverVersion").isEmpty()
+                    ? "Turnip " + meta.optString("driverVersion") : displayName);
+
+            // Seleção (KEY=VALUE, lido pelo nativo)
+            StringBuilder sb = new StringBuilder();
+            sb.append("dir=").append(out.dir).append('\n');
+            sb.append("library=").append(out.library).append('\n');
+            sb.append("name=").append(out.name).append('\n');
+            writeTextFile(new File(base, DRIVER_SELECTED), sb.toString());
+
+            // Limpa instalações antigas (mantém a atual)
+            File[] others = installedRoot.listFiles();
+            if (others != null) {
+                for (File d : others) {
+                    if (!d.getAbsolutePath().equals(target.getAbsolutePath())) {
+                        deleteRecursively(d);
+                    }
+                }
+            }
+            return out;
+        } catch (Exception ex) {
+            deleteRecursively(target);
+            throw ex;
+        }
+    }
+
+    /** Procura meta.json na raiz ou em subdiretórios. Retorna {prefixo, conteúdo} ou null. */
+    private Object[] findMetaJson(InputStream in) throws IOException {
+        ZipInputStream zip = new ZipInputStream(in);
+        ZipEntry entry;
+        while ((entry = zip.getNextEntry()) != null) {
+            String name = entry.getName();
+            if (entry.isDirectory()) continue;
+            if (name.endsWith("/meta.json") || name.equals("meta.json")) {
+                String prefix = name.equals("meta.json") ? "" : name.substring(0, name.length() - "meta.json".length());
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = zip.read(buf)) > 0) bos.write(buf, 0, n);
+                return new Object[] { prefix, bos.toString("UTF-8") };
+            }
+        }
+        return null;
+    }
+
+    private void extractZipUnderPrefix(Uri uri, String prefix, File target) throws IOException {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("não foi possível reabrir o zip");
+            ZipInputStream zip = new ZipInputStream(in);
+            ZipEntry entry;
+            long total = 0;
+            int entries = 0;
+            String canonicalTarget = target.getCanonicalPath() + File.separator;
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (entry.isDirectory() || !name.startsWith(prefix)) continue;
+                String rel = name.substring(prefix.length());
+                if (rel.isEmpty()) continue;
+                if (++entries > MAX_DRIVER_ENTRIES) throw new IOException("zip com entradas demais");
+                if (rel.contains("..") || rel.startsWith("/")) {
+                    throw new IOException("caminho suspeito no zip: " + name);
+                }
+                File out = new File(target, rel);
+                if (!out.getCanonicalPath().startsWith(canonicalTarget)) {
+                    throw new IOException("zip-slip detectado: " + name);
+                }
+                File parent = out.getParentFile();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+                    throw new IOException("não foi possível criar " + parent);
+                }
+                byte[] buf = new byte[1 << 16];
+                try (OutputStream os = new FileOutputStream(out)) {
+                    int n;
+                    while ((n = zip.read(buf)) > 0) {
+                        total += n;
+                        if (total > MAX_DRIVER_ZIP_BYTES) throw new IOException("driver maior que 512 MB");
+                        os.write(buf, 0, n);
+                    }
+                }
+            }
+        }
+    }
+
+    private void removeDriver() {
+        if (mDriverWorkRunning) return;
+        try {
+            File base = new File(getFilesDir(), DRIVER_BASE);
+            new File(base, DRIVER_SELECTED).delete();
+            File installedRoot = new File(base, DRIVER_INSTALLED);
+            File[] dirs = installedRoot.listFiles();
+            if (dirs != null) for (File d : dirs) deleteRecursively(d);
+            deleteRecursively(new File(base, "tmp"));
+            deleteRecursively(new File(base, "cache"));
+            Log.i(TAG, "Driver removido");
+            toast("Driver removido — o jogo voltará a usar o driver do sistema.");
+        } catch (Exception ex) {
+            Log.e(TAG, "Falha ao remover driver", ex);
+            toast("Falha ao remover driver: " + ex.getMessage());
+        }
+        refreshDriverStatus();
+    }
+
+    private void refreshDriverStatus() {
+        if (mDriverStatus == null) return;
+        DriverMeta sel = readSelectedDriver();
+        if (sel != null) {
+            mDriverStatus.setText("Ativo: " + sel.name + " (" + sel.library + ")\n"
+                    + "Aplicado ao iniciar o jogo. Toque em Remover para voltar ao driver do sistema.");
+            mDriverRemoveButton.setEnabled(true);
+        } else {
+            mDriverStatus.setText("Usando o driver do sistema (padrão).");
+            mDriverRemoveButton.setEnabled(false);
+        }
+    }
+
+    /** Mesmo formato que o nativo (custom_driver.cpp) lê: linhas KEY=VALUE. */
+    private DriverMeta readSelectedDriver() {
+        try {
+            File f = new File(new File(getFilesDir(), DRIVER_BASE), DRIVER_SELECTED);
+            if (!f.isFile()) return null;
+            DriverMeta meta = new DriverMeta();
+            for (String line : readTextFile(f).split("\n")) {
+                line = line.trim();
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                String key = line.substring(0, eq);
+                String value = line.substring(eq + 1);
+                if (key.equals("dir")) meta.dir = value;
+                else if (key.equals("library")) meta.library = value;
+                else if (key.equals("name")) meta.name = value;
+            }
+            if (meta.dir == null || meta.library == null) return null;
+            return meta;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static String sanitizeId(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.toLowerCase().toCharArray()) {
+            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+                sb.append(c);
+            } else {
+                sb.append('_');
+            }
+        }
+        String out = sb.toString();
+        return out.isEmpty() ? "driver" : out;
+    }
+
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) for (File c : children) deleteRecursively(c);
+        f.delete();
+    }
+
+    // ------------------------------------------------------------------
     // Cópia dos assets do APK para o armazenamento interno (1ª execução)
     //
     // Mapeamento esperado pelo nativo (get_program_path() = filesDir):
@@ -347,7 +716,7 @@ public class SetupActivity extends Activity {
             runOnUiThread(() -> {
                 mAssetCopyRunning = false;
                 setStatus(finalError != null ? finalError : "");
-                maybeHandOff();
+                updateStartState();
             });
         }, "dk64-asset-copy").start();
     }

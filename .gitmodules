@@ -15,3 +15,6 @@
 [submodule "lib/vcpkg"]
 	path = lib/vcpkg
 	url = https://github.com/microsoft/vcpkg
+[submodule "lib/adrenotools"]
+	path = lib/adrenotools
+	url = https://github.com/bylaws/libadrenotools

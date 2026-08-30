@@ -18,3 +18,132 @@ index 9dcfedf..a657973 100644
  #elif defined(__linux__)
      struct RenderWindow {
          Display* display;
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f1dd503..aa8a432 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -10,6 +10,24 @@
+ 
+ #include "plume_vulkan.h"
+ 
++#if defined(__ANDROID__) && defined(PLUME_SDL_VULKAN_ENABLED)
++// Port DK64-Recomp Android: necessário para SDL_GetWindowWMInfo (obter o
++// ANativeWindow e criar a surface pela instância do driver ativo).
++#include <SDL_syswm.h>
++#endif
++
++#if defined(__ANDROID__)
++// Port DK64-Recomp Android: ponte para o driver Vulkan custom (Turnip) via
++// libadrenotools — implementado em android/native/compat/custom_driver.cpp.
++// dk64_adrenotools_get_instance_proc_addr retorna o vkGetInstanceProcAddr do
++// driver instalado pelo usuário (ou nullptr p/ usar o driver do sistema);
++// dk64_adrenotools_custom_driver_active informa se o driver custom está em uso.
++extern "C" {
++void *dk64_adrenotools_get_instance_proc_addr(void);
++int dk64_adrenotools_custom_driver_active(void);
++}
++#endif
++
+ #include <algorithm>
+ #include <cmath>
+ #include <climits>
+@@ -2097,11 +2115,40 @@ namespace plume {
+         }
+ #   elif defined(PLUME_SDL_VULKAN_ENABLED)
+         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
++#       if defined(__ANDROID__)
++        // Port DK64-Recomp Android: cria a surface pela PRÓPRIA instância
++        // (vkCreateAndroidSurfaceKHR da tabela do volk, já roteada para o
++        // driver ativo: Turnip ou sistema). O caminho padrão
++        // SDL_Vulkan_CreateSurface usaria o loader Vulkan do próprio SDL
++        // (libvulkan.so do sistema), criando uma surface cross-driver
++        // incompatível com a instância do Turnip.
++        SDL_SysWMinfo wmInfo;
++        SDL_VERSION(&wmInfo.version);
++        if (SDL_GetWindowWMInfo(desc.renderWindow, &wmInfo) != SDL_TRUE) {
++            fprintf(stderr, "SDL_GetWindowWMInfo failed with error %s.\n", SDL_GetError());
++            return;
++        }
++
++        if (wmInfo.subsystem != SDL_SYSWM_ANDROID) {
++            fprintf(stderr, "Unexpected SDL subsystem %d, expected Android.\n", static_cast<int>(wmInfo.subsystem));
++            return;
++        }
++
++        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
++        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++        surfaceCreateInfo.window = wmInfo.info.android.window;
++        res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X.\n", res);
++            return;
++        }
++#       else
+         SDL_bool sdlRes = SDL_Vulkan_CreateSurface(desc.renderWindow, renderInterface->instance, &surface);
+         if (sdlRes == SDL_FALSE) {
+             fprintf(stderr, "SDL_Vulkan_CreateSurface failed with error %s.\n", SDL_GetError());
+             return;
+         }
++#       endif
+ #   elif defined(__ANDROID__)
+         assert(desc.renderWindow != nullptr);
+         VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
+@@ -2704,7 +2751,7 @@ namespace plume {
+     }
+ 
+     void VulkanQueryPool::queryResults() {
+-	    VkResult res = vkGetQueryPoolResults(device->vk, vk, 0, uint32_t(results.size()), sizeof(uint64_t) * results.size(), results.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
++            VkResult res = vkGetQueryPoolResults(device->vk, vk, 0, uint32_t(results.size()), sizeof(uint64_t) * results.size(), results.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkGetQueryPoolResults failed with error code 0x%X.\n", res);
+             return;
+@@ -4131,7 +4178,18 @@ namespace plume {
+         capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
+         capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
+         capabilities.presentWait = presentWaitSupported;
++#if defined(__ANDROID__)
++        // Port DK64-Recomp Android: o driver proprietário Adreno antigo (ex.:
++        // moto g34 5G, driver LA.UM.9.14) sofre SIGSEGV dentro da implementação
++        // de vkGetRefreshCycleDurationGOOGLE no libvulkan do sistema (a extensão
++        // VK_GOOGLE_display_timing é emulada pelo framework Android). Com o
++        // driver do sistema, o RT64 usa o pacing pelo refresh rate do SDL;
++        // com Turnip (adrenotools) a extensão é implementada pelo driver.
++        capabilities.displayTiming = (dk64_adrenotools_custom_driver_active() != 0) &&
++            (supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end());
++#else
+         capabilities.displayTiming = supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end();
++#endif
+         capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
+         capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
+         capabilities.dynamicDepthBias = true;
+@@ -4464,11 +4522,30 @@ namespace plume {
+ #else
+     VulkanInterface::VulkanInterface() {
+ #endif
++#if defined(__ANDROID__)
++        // Port DK64-Recomp Android: usa o driver Vulkan custom (Turnip via
++        // adrenotools) quando houver um instalado no app; volkInitializeCustom
++        // preenche a tabela do volk com o vkGetInstanceProcAddr do driver.
++        // Sem driver custom (ou falha no carregamento), cai no volkInitialize()
++        // padrão, que dlopen'a a libvulkan.so do sistema.
++        PFN_vkGetInstanceProcAddr customProc =
++            reinterpret_cast<PFN_vkGetInstanceProcAddr>(dk64_adrenotools_get_instance_proc_addr());
++        if (customProc != nullptr) {
++            volkInitializeCustom(customProc);
++        }
++
++        VkResult res = (customProc != nullptr) ? VK_SUCCESS : volkInitialize();
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
++            return;
++        }
++#else
+         VkResult res = volkInitialize();
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
+             return;
+         }
++#endif
+ 
+         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+         appInfo.pApplicationName = "plume";

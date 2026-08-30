@@ -90,6 +90,25 @@ git -C lib/RecompFrontend apply ../../android/patches/recompfrontend-android.pat
 cd android && ./gradlew assembleDebug -PHOST_FILE_TO_C="$PWD/../build-filetoc/file_to_c"
 ```
 
+## Driver Vulkan (Turnip) — opcional
+
+Em alguns dispositivos o driver proprietário Adreno tem bugs de Vulkan (ex.:
+crash `SIGSEGV` em `vkGetRefreshCycleDurationGOOGLE` na thread `RT64 Present`,
+visto no moto g34 5G). O port integra o **libadrenotools** (como Vita3K,
+yuzu/sudachi e os ports de recompilados com RT64): você pode instalar um
+driver **Mesa Turnip** em .zip e o jogo passa a usá-lo no lugar do driver do
+sistema.
+
+1. Baixe um driver no formato adrenotools — ex.:
+   [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers)
+   (`Turnip_vX.Y.Z_R*.zip`; há variantes `Gmem`/`Sysmem`).
+2. No app: **Instalar driver (.zip)…** → selecione o zip → **INICIAR JOGO**.
+3. Para voltar ao driver do sistema: **Remover driver**.
+
+O início do jogo agora é pelo botão **INICIAR JOGO** (a tela de setup continua
+acessível em todo launch). Requer Adreno a6xx/a7xx + arm64; Android 10+
+recomendado. Detalhes da implementação: [docs/DRIVER-VULKAN.md](docs/DRIVER-VULKAN.md).
+
 ## Notas técnicas do port
 
 - `libmain.so` (SDL2 estático + runtime + RT64) carregado via `SDLActivity`
@@ -99,6 +118,8 @@ cd android && ./gradlew assembleDebug -PHOST_FILE_TO_C="$PWD/../build-filetoc/fi
   (diálogo de ROM = escaneamento de pasta + SAF; mod store offline)
 - Patches aplicados aos submódulos `rt64`/`RecompFrontend` via `git apply`
   (`android/patches/*.patch`) — submódulos permanecem upstream
+- Vulkan via volk (`VK_NO_PROTOTYPES`): driver do sistema ou Turnip
+  customizável via libadrenotools (ver [docs/DRIVER-VULKAN.md](docs/DRIVER-VULKAN.md))
 - Alinhamento 16KB pages; minSdk 26; arm64-v8a
 
 ## Créditos e licença

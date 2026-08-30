@@ -78,6 +78,11 @@ add_compile_definitions(
     PLUME_SDL_VULKAN_ENABLED
     RT64_SDL_WINDOW_VULKAN
     RECOMP_ANDROID
+    # Driver Vulkan custom (Turnip via adrenotools): com VK_NO_PROTOTYPES todas
+    # as chamadas vk* (plume/rt64/imgui/VMA) passam pela tabela de ponteiros do
+    # volk, que é inicializada pelo volkInitializeCustom() com o
+    # vkGetInstanceProcAddr do driver escolhido (ou dlopen padrão do sistema).
+    VK_NO_PROTOTYPES
 )
 # __PRFCHWINTRIN_H: ver comentário do CMake raiz upstream (só afeta clang-cl, inofensivo aqui)
 
@@ -228,7 +233,29 @@ FetchContent_MakeAvailable(freetype)
 find_package(Freetype REQUIRED)
 
 # ----------------------------------------------------------------------------
-# 5) Dependências do recomp (mesma ordem do CMake raiz upstream)
+# 5) libadrenotools (driver Vulkan Turnip instalável via .zip)
+# ----------------------------------------------------------------------------
+# O volk (submodule aninhado do plume) JÁ é compilado dentro de plume_vulkan.cpp
+# (VOLK_IMPLEMENTATION) e, com o VK_NO_PROTOTYPES global (definido acima), todas
+# as chamadas vk* do binário passam pela tabela de ponteiros dele. O plume
+# inicializa essa tabela com volkInitializeCustom() usando o vkGetInstanceProcAddr
+# do driver Turnip carregado via adrenotools (ver patch do plume e
+# native/compat/custom_driver.cpp) ou, sem driver custom, com o volkInitialize()
+# padrão (driver do sistema).
+#
+# libadrenotools (bylaws) abre a libvulkan.so do sistema com hooks que
+# redirecionam o carregamento do driver para um Turnip instalado pelo usuário.
+# Os hooks (libmain_hook.so/libhook_impl.so/libfile_redirect_hook.so) são
+# targets SHARED deste build e vão parar no mesmo dir de saída do libmain.so,
+# sendo empacotados no APK e extraídos em nativeLibraryDir
+# (useLegacyPackaging=true no build.gradle.kts — requisito do adrenotools).
+if(NOT EXISTS "${REPO_ROOT}/lib/adrenotools/CMakeLists.txt")
+    message(FATAL_ERROR "lib/adrenotools ausente — rode 'git submodule update --init lib/adrenotools'")
+endif()
+add_subdirectory("${REPO_ROOT}/lib/adrenotools" "${CMAKE_BINARY_DIR}/adrenotools")
+
+# ----------------------------------------------------------------------------
+# 5-bis) Dependências do recomp (mesma ordem do CMake raiz upstream)
 # ----------------------------------------------------------------------------
 add_subdirectory("${RT64_DIR}" "${CMAKE_BINARY_DIR}/rt64")
 add_subdirectory("${NMR_DIR}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
@@ -328,6 +355,7 @@ set(MAIN_SOURCES
     "${REPO_ROOT}/rsp/n_aspMain.cpp"
 
     "${ANDROID_PORT_DIR}/native/compat/android_paths.cpp"
+    "${ANDROID_PORT_DIR}/native/compat/custom_driver.cpp"
 )
 target_sources(main PRIVATE ${MAIN_SOURCES} "${ICON_GEN_DIR}/icon_bytes.c")
 
@@ -369,7 +397,13 @@ target_link_libraries(main PRIVATE
     rt64
     nfd
     SDL2-static
-    vulkan
+    # NÃO linkamos 'vulkan' do NDK: com VK_NO_PROTOTYPES todas as chamadas vk*
+    # passam pela tabela do volk (definida em plume_vulkan.cpp via
+    # VOLK_IMPLEMENTATION), inicializada com o driver do sistema
+    # (volkInitialize) ou com o Turnip (volkInitializeCustom via adrenotools).
+    # Linkar a libvulkan.so do NDK esconderia chamadas que escaparam da tabela
+    # — melhor virar erro de link e corrigir na fonte.
+    adrenotools
     android
     log
     ${CMAKE_DL_LIBS}
