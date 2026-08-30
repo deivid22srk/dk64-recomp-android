@@ -152,14 +152,20 @@ public class SetupActivity extends Activity {
     }
 
     /**
-     * FEATURE_VULKAN_VERSION e hasSystemFeature(String,int) existem desde a
-     * API 24 (minSdk 26). A versão usa a codificação VK_MAKE_VERSION:
-     * 1.1 -> (1<<22)|(1<<12)|0 = 0x00401000. hasSystemFeature retorna true
-     * se a versão disponível for >= à pedida.
+     * A feature "android.hardware.vulkan.version" (PackageManager.FEATURE_VULKAN_VERSION)
+     * e hasSystemFeature(String,int) existem desde a API 24 (minSdk 26). A versão usa a
+     * codificação VK_MAKE_VERSION: 1.1 -> (1<<22)|(1<<12)|0 = 0x00401000.
+     * hasSystemFeature retorna true se a versão disponível for >= à pedida.
+     * Usamos a string literal para não depender do nome da constante no compileSdk.
      */
     private boolean vulkanOk() {
         PackageManager pm = getPackageManager();
-        return pm.hasSystemFeature(PackageManager.FEATURE_VULKAN_VERSION, 0x00401000 /* Vulkan 1.1 */);
+        try {
+            return pm.hasSystemFeature("android.hardware.vulkan.version", 0x00401000 /* Vulkan 1.1 */);
+        } catch (Throwable ignored) {
+            // Device/pacote sem a feature declarada: tratamos como não suportado.
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------
