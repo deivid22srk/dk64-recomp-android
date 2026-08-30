@@ -181,12 +181,19 @@ set(RECOMP_FRONTEND_N64MODERNRUNTIME_PATH "${NMR_DIR}")
 set(RECOMP_FRONTEND_RT64_PATH "${RT64_DIR}")
 add_subdirectory("${FRONTEND_DIR}" "${CMAKE_BINARY_DIR}/RecompFrontend")
 
-# Injeção de includes SDL2 nos alvos dos submódulos (branches Linux não disparam em Android)
+# Injeção de includes SDL2 nos alvos dos submódulos (branches Linux não disparam em Android).
+# plume: injetado explicitamente porque o próprio CMake dele decide os includes do SDL
+# dentro de um bloco dependente de variáveis de escopo (cmake_dependent_option +
+# find_package tardio do rt64) e, no cross Android, o include do SDL_vulkan.h não
+# chegou ao alvo no 1º run do CI (erro: SDL_vulkan.h not found).
 foreach(_t rt64 recompui recompinput ultramodern librecomp)
     if(TARGET ${_t})
         target_include_directories(${_t} PRIVATE ${SDL2_ALL_INCLUDES})
     endif()
 endforeach()
+if(TARGET plume)
+    target_include_directories(plume PRIVATE ${SDL2_ALL_INCLUDES})
+endif()
 # Patch do RecompFrontend (file.cpp) usa android_paths.h
 if(TARGET recompui)
     target_include_directories(recompui PRIVATE "${ANDROID_PORT_DIR}/native/compat")
