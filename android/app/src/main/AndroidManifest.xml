@@ -1,27 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- ============================================================
+         Baseado no template android-project do SDL 2.30.3 (vendored).
+         - SDL renderiza em SurfaceView própria; hardwareAccelerated segue
+           o template ("true") — não interfere na superfície do SDL.
+         - uses-feature required=false: não filtrar dispositivos sem
+           touchscreen/gamepad/bluetooth/USB na instalação.
+         - VIBRATE: SDL_Init(HAPTIC) em src/main/main.cpp usa o vibrador.
+         - Vulkan é checado em runtime (SetupActivity) com aviso, por isso
+           NÃO declaramos uses-feature vulkan.version required.
+         ============================================================ -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.type.pc"
+        android:required="false" />
+
+    <!-- Vibração (SDL haptics / rumble de gamepad). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Bluetooth para HID (Steam Controller): opcional, requer BLUETOOTH_CONNECT
+         no Android 12+; o SDL degrada graciosamente sem a permissão.
+         <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" /> -->
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:largeHeap="true"
-        android:hardwareAccelerated="false"
+        android:hardwareAccelerated="true"
         android:theme="@style/AppTheme">
 
         <!-- Port Android do DK64: Recompiled — gamepad prioridade; touch para menus. -->
+        <!-- Launcher: prepara ROM + assets e só então inicia o SDL (MainActivity). -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SetupActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|fontScale|locale"
-            android:launchMode="singleTask">
+            android:launchMode="singleTop"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|fontScale|keyboard|keyboardHidden|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- SDLActivity (fluxo padrão do SDL 2.30.3; sem overrides de ciclo de vida). -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:alwaysRetainTaskState="true"
+            android:preferMinimalPostProcessing="true"
+            android:launchMode="singleTask"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|fontScale|keyboard|keyboardHidden|navigation" />
     </application>
 
 </manifest>

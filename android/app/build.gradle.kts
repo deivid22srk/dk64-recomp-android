@@ -71,8 +71,13 @@ android {
 
     sourceSets {
         getByName("main") {
-            // assets do jogo (UI/fonts) empacotados no APK
-            assets.srcDirs(files("../../assets"))
+            // assets do jogo (UI/fonts) empacotados no APK, MESCLADOS com o
+            // default src/main/assets (recompcontrollerdb.txt).
+            // srcDir (singular) ADICIONA ao default; srcDirs (plural) substituiria
+            // o src/main/assets e tiraria o recompcontrollerdb.txt do APK.
+            // files() resolve relativo ao diretório do MÓDULO (android/app):
+            // "../../assets" -> <repo>/assets (Cloud1.svg, icons/, promptfont/, ...).
+            assets.srcDir(files("../../assets"))
         }
     }
 }

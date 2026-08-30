@@ -41,16 +41,21 @@ android/                   projeto Gradle
 - Link: PatchesLib RecompiledFuncs recompui recompinput librecomp ultramodern rt64 nfd SDL2-static vulkan android log ${CMAKE_DL_LIBS}; flags: -fno-strict-aliasing (fontes recomp), `-Wl,-z,max-page-size=16384`, STL c++_shared (via gradle)
 - src/main/main.cpp (arquivo do repo — EDITÁVEL): `#ifdef __ANDROID__ #include <SDL_main.h> #else #define SDL_MAIN_HANDLED #endif` + parse de argv (filesDir, extFilesDir) -> android_paths
 
-## Runtime Android
-- MainActivity extends SDLActivity (java vendored de SDL2 2.30.3): getMainLibName()="main",
-  getArguments() = {"dk64recomp", filesDir, extFilesDir}
-- onCreate: (1) checa Vulkan >=1.1 (aviso se ausente); (2) se não há ROM em filesDir/extFilesDir
-  -> UI própria com botão SAF (ACTION_OPEN_DOCUMENT, copia p/ extFilesDir) e NÃO chama super.onCreate;
-  após ROM presente -> recreate() -> fluxo SDL normal
-- Cópia de assets do APK (assets/ + recompcontrollerdb.txt) para filesDir na 1ª execução (marcador .assets_version)
+## Runtime Android (após revisão do agente 6-b)
+- **SetupActivity** (launcher): checa Vulkan >=1.1 (aviso), garante ROM (.z64/.n64/.v64 via
+  scan de filesDir/extFilesDir ou SAF picker com cópia em background) e assets copiados,
+  então faz handoff para a MainActivity e finish()
+- **MainActivity extends SDLActivity**: ciclo SDL padrão (super.onCreate sempre chamado);
+  getLibraries()={"main"}; getArguments() = {filesDir, extFilesDir}
+  ⚠️ SDL_android.c (nativeRunMain) define argv[0]="app_process" e copia getArguments()
+  a partir de argv[1] — por isso NÃO enviamos nome do app em getArguments()
+- Cópia de assets do APK (assets/ + recompcontrollerdb.txt) para filesDir na 1ª execução
+  (marcador .assets_version); mapping: APK assets/<x> -> filesDir/assets/<x>, exceto
+  recompcontrollerdb.txt -> filesDir/recompcontrollerdb.txt
 - `recompui::file::open_file_dialog` (Android): escaneia extFilesDir/filesDir por *.z64/*.n64/*.v64 ->
   callback(path) — o runtime valida hash, faz byteswap e guarda em <config>/DK64.z64
-- Manifest: landscape sensor, largeHeap, hardwareAccelerated=false, configChanges completos
+- Manifest: landscape sensor, largeHeap, hardwareAccelerated=true (padrão do template SDL 2.30.3),
+  VIBRATE p/ haptics do SDL, uses-feature opcionais, configChanges completos
 
 ## CI (build.yml, ubuntu-latest)
 1. checkout submodules recursive (vcpkg skip via update=none)

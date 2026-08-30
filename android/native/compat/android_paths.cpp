@@ -1,8 +1,9 @@
 /*
  * android_paths.cpp — resolução de caminhos para o port Android.
  *
- * O SDLActivity (Java) passa, via getArguments(), os diretórios do app:
- *   argv[0] = "dk64recomp"
+ * Contrato de argv com o SDL 2.30.3: SDL_android.c (nativeRunMain) monta
+ * argv[0]="app_process" e copia o array retornado por getArguments() do
+ * MainActivity a partir de argv[1] ("arguments AFTER the application name"):
  *   argv[1] = internal files dir  (filesDir)
  *   argv[2] = external files dir  (getExternalFilesDir(null))
  * Esses valores ficam em globais e são consumidos pelo patch do RecompFrontend
