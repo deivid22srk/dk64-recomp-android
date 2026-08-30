@@ -1,10 +1,10 @@
 # DESIGN — Port Android do DK64-Recompiled (decisões de arquitetura)
 
-> Leia também: `/home/z/my-project/port-docs/INVESTIGATION.md` (diagnóstico do upstream).
 
 ## Decisões do usuário (fechadas)
 - ROM runtime: APK **sem** ROM; scan de `Android/data/com.deivid22srk.dk64recomp/files/` + seletor SAF
-- ROM build: release asset `build-inputs` no próprio repo (workflow baixa via GITHUB_TOKEN)
+- ROM build: release asset `build-inputs` em repo PRIVADO separado (`dk64-recomp-build-inputs`;
+  workflow baixa via secret `PRIVATE_REPO_TOKEN` — a ROM nunca fica no repo público)
 - Gamepad prioridade; touch só menus · minSdk 26 · arm64-v8a · APK Debug · repo `dk64-recomp-android` público · docs PT-BR
 
 ## Árvore do port (repo novo)
@@ -19,14 +19,18 @@ android/                   projeto Gradle
     rt64-android.patch
     plume-android.patch
     recompfrontend-android.patch
-  app/src/main/            AndroidManifest.xml, MainActivity.java, res/, java org.libsdl.app (vendored SDL2 2.30.3)
+  app/src/main/            AndroidManifest.xml, MainActivity.java, res/, java org.libsdl.app (vendored SDL2 2.30.8)
 .github/workflows/build.yml  build completo (codegen host + gradle APK debug)
 ```
 
 ## Estratégia CMake (android/app/CMakeLists.txt) — SEM editar submódulos
 - Root próprio (NÃO inclui o CMakeLists raiz do upstream, que exige vcpkg/SDL do sistema)
-- SDL2 2.30.3 via FetchContent (SDL_STATIC=ON, SDL_SHARED=OFF, SDL_TEST=OFF;
-  SDL_TEST_LIBRARY NÃO existe no CMake do SDL 2.30.3 — o nome real é SDL_TEST).
+- SDL2 2.30.8 via FetchContent (SDL_STATIC=ON, SDL_SHARED=OFF, SDL_TEST=OFF;
+  o nome real da opção de testes na série 2.30 é SDL_TEST — SDL_TEST_LIBRARY não existe).
+  Drift guard no CMake: as constantes SDL_MAJOR/MINOR/MICRO_VERSION do Java vendored
+  têm que ser iguais à versão da SDL C (o SDLActivity checa nativeGetVersion() no
+  startup e aborta com 'SDL C/Java version mismatch' — erro que só aparece no device).
+  Ao subir a versão, copie o android-project/app/src/main/java do tarball da SDL.
   Compat de includes:
   `${CMAKE_BINARY_DIR}/sdl2inc/SDL2/*` (cópia dos headers, EXCETO
   SDL_config.h/SDL_revision.h) p/ `#include "SDL2/SDL.h"`
@@ -75,13 +79,13 @@ android/                   projeto Gradle
   via `renderer_context->get_display_framerate()`; no Android = SDL_GetWindowDisplayIndex)
 - Threads: ultramodern usa pthread_setname_np (bionic API 26+, minSdk 26 OK) e
   não usa sem_open — sem problema de API level
-- Manifest: landscape sensor, largeHeap, hardwareAccelerated=true (padrão do template SDL 2.30.3),
+- Manifest: landscape sensor, largeHeap, hardwareAccelerated=true (padrão do template SDL 2.30.8),
   VIBRATE p/ haptics do SDL, uses-feature opcionais, configChanges completos
 
 ## CI (build.yml, ubuntu-latest)
 1. checkout submodules recursive (vcpkg skip via update=none)
 2. apt: ninja-build lld clang llvm (patches ELF mips) ; java 17
-3. ROM: gh release download build-inputs (GITHUB_TOKEN) -> unzip -> valida sha1 cf806ff... 
+3. ROM: gh release download build-inputs no repo PRIVADO (secret PRIVATE_REPO_TOKEN) -> unzip -> valida sha1 cf806ff... 
 4. codegen host: clone N64Recomp @ 2b6f05688de2abc7d86da5b4a89b84c2c6acbabe, build N64RecompCLI+RSPRecomp (ninja)
 5. descompressão: cp ROM -> baserom.us.z64 (tmp) ; python3 generate_decompressed_rom.py ; mv -> donkeykong64.decompressed.us.z64
 6. ./N64Recomp us.toml ; ./RSPRecomp n_aspMain.toml ; make -C patches CC=clang LD=ld.lld ; ./N64Recomp patches.toml

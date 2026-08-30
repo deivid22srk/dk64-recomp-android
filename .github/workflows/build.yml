@@ -2,7 +2,8 @@ name: build
 
 # Build do APK Android a cada push (e manualmente via workflow_dispatch).
 # Fluxo: codegen no host (N64Recomp/RSPRecomp/patches com a ROM do release
-# `build-inputs`) -> Gradle + NDK -> APK debug assinado.
+# `build-inputs` do repo PRIVADO `dk64-recomp-build-inputs`, baixado via
+# secret PRIVATE_REPO_TOKEN) -> Gradle + NDK -> APK debug assinado.
 
 on:
   push:
@@ -46,13 +47,17 @@ jobs:
           clang --version | head -1
           ld.lld --version
 
-      - name: Baixar ROM de input (release asset build-inputs) e validar
+      - name: Baixar ROM de input (release asset em repo privado) e validar
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::Secret PRIVATE_REPO_TOKEN ausente — crie um PAT com acesso de leitura ao repo privado de inputs e defina o secret (ver scripts/setup-build-inputs-repo.sh)."
+            exit 1
+          fi
           mkdir -p rom-input
-          gh release download build-inputs --repo "$GITHUB_REPOSITORY" \
+          gh release download build-inputs --repo deivid22srk/dk64-recomp-build-inputs \
             --pattern 'Donkey.Kong.64.zip' --output rom-input/Donkey.Kong.64.zip --clobber
           cd rom-input
           unzip -o Donkey.Kong.64.zip

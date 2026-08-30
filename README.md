@@ -40,8 +40,9 @@ Cada push gera um APK automaticamente no GitHub Actions (workflow `build.yml`):
 
 O build tem duas fases (ambas automatizadas no CI):
 
-1. **Codegen no host** — baixa a ROM de input (release asset `build-inputs` deste repo,
-   via `GITHUB_TOKEN`), descomprime com o script do [decomp do DK64](https://gitlab.com/dk64_decomp/dk64),
+1. **Codegen no host** — baixa a ROM de input do release `build-inputs` de um
+   **repositório privado separado** (`dk64-recomp-build-inputs`, via secret
+   `PRIVATE_REPO_TOKEN`), descomprime com o script do [decomp do DK64](https://gitlab.com/dk64_decomp/dk64),
    compila [N64Recomp](https://github.com/N64Recomp/N64Recomp)/`RSPRecomp` e roda
    `us.toml`, `n_aspMain.toml` e `patches.toml`; além do `file_to_c` (host).
 2. **APK via Gradle+NDK** — `android/gradlew assembleDebug` com `externalNativeBuild`
@@ -49,6 +50,25 @@ O build tem duas fases (ambas automatizadas no CI):
 
 Detalhes completos: [DESIGN.md](DESIGN.md) · README original do upstream: [README-UPSTREAM.md](README-UPSTREAM.md)
 · build desktop: [BUILDING.md](BUILDING.md).
+
+### Repositório privado de inputs (setup único para quem compila)
+
+O zip com a ROM de build **não fica neste repo público** (nem em releases dele):
+fica em um repositório **privado** que o CI acessa via PAT. Configure tudo com o
+script pronto (requer [gh CLI](https://cli.github.com/), `zip`/`unzip` e um PAT
+classic com escopo `repo` — de preferência um token novo, não compartilhado em chats):
+
+```bash
+GH_TOKEN=ghp_... ROM_ZIP=caminho/para/Donkey.Kong.64.zip \
+  ./scripts/setup-build-inputs-repo.sh --purge-public
+```
+
+O script: valida o sha1 da ROM (NTSC-U 1.0), cria o repo privado
+`dk64-recomp-build-inputs`, publica o release `build-inputs` com o asset
+`Donkey.Kong.64.zip`, define o secret `PRIVATE_REPO_TOKEN` neste repo e
+( com `--purge-public` ) remove qualquer release/tag `build-inputs` antiga
+deste repo público. Se você rotacionar o PAT depois, basta rodar o script
+de novo (ou `gh secret set PRIVATE_REPO_TOKEN`) para o CI continuar funcionando.
 
 ### Local (sem CI)
 
