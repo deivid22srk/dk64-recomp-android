@@ -501,7 +501,17 @@ extern "C" void osViGetCurrentMode_recomp(uint8_t* rdram, recomp_context* ctx) {
 // ===========================================================================
 extern "C" void recomp_touch_frame_state(uint8_t* rdram, recomp_context* ctx) {
     (void)ctx;
-    uint8_t game_mode_copy = *(uint8_t*)(rdram + (0x80755314ULL - 0xFFFFFFFF80000000ULL));
-    uint32_t current_map = *(uint32_t*)(rdram + (0x8076A0A8ULL - 0xFFFFFFFF80000000ULL));
+    // ⚠️ Offsets na RAM do jogo = vaddr - 0x80000000 (mapeamento plano do
+    // recomp: 0x80000000 -> rdram + 0). Os endereços PRECISAM da forma
+    // estendida por sinal (0xFFFFFFFF8xxxxxxx), como em
+    // osViGetCurrentMode_recomp acima: subtrair 0xFFFFFFFF80000000 de um
+    // literal de 32 bits (ex.: 0x8076A0A8) estende com zero e estoura em
+    // 64 bits sem sinal, resultando rdram + 0x10076A0A8 (+4 GiB) em vez de
+    // rdram + 0x76A0A8 — SIGSEGV (SEGV_ACCERR) no primeiro frame do jogo
+    // (fault addr = rdram + 0x10076A0A8, backtrace recomp_touch_frame_state).
+    constexpr uint64_t GAME_MODE_COPY_OFF = 0x755314; // vram 0x80755314 (u8)
+    constexpr uint64_t CURRENT_MAP_OFF    = 0x76A0A8; // vram 0x8076A0A8 (Maps, u32)
+    uint8_t game_mode_copy = *(uint8_t*)(rdram + GAME_MODE_COPY_OFF);
+    uint32_t current_map = *(uint32_t*)(rdram + CURRENT_MAP_OFF);
     touchlayer::notify_game_state(game_mode_copy, (uint8_t)current_map);
 }
