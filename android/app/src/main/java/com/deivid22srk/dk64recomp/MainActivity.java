@@ -12,7 +12,7 @@ import java.io.File;
  *
  * Esta Activity NÃO é a launcher: o {@link SetupActivity} garante ROM + assets
  * prontos antes de iniciá-la, então o onCreate NÃO é sobrescrito para "pular"
- * o super — o ciclo de vida do SDLActivity 2.30.3 (loadLibraries -> SDLThread
+ * o super — o ciclo de vida do SDLActivity 2.30.8 (loadLibraries -> SDLThread
  * -> SDL_main) roda 100% padrão. Sobrescrever onCreate sem chamar
  * super.onCreate() derruba o app com SuperNotCalledException (o framework
  * exige chamada ao super.onCreate de android.app.Activity) e deixaria
@@ -39,7 +39,7 @@ public class MainActivity extends SDLActivity {
     }
 
     /**
-     * IMPORTANTE: em SDL 2.30.3 o javadoc diz "arguments AFTER the application
+     * IMPORTANTE: em SDL 2.30.8 o javadoc diz "arguments AFTER the application
      * name" — SDL_android.c (nativeRunMain) monta argv[0]="app_process" e copia
      * o array retornado aqui a partir de argv[1] (NÃO adicionamos um argv[0]
      * próprio; isso deslocaria os paths lidos pelo nativo).

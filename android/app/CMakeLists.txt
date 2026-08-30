@@ -85,17 +85,55 @@ add_compile_definitions(
 # 2) SDL2 2.30.8 (estático) — série 2.30 do upstream com fix ALooper p/ NDK r27
 # ----------------------------------------------------------------------------
 include(FetchContent)
+set(SDL2_VERSION "2.30.8" CACHE STRING
+    "Versão da SDL2 — o Java vendored em org/libsdl/app PRECISA ser o mesmo release")
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
-# SDL_TEST é o nome real da opção do CMake do SDL 2.30.3 (não existe SDL_TEST_LIBRARY)
+# SDL_TEST é o nome real da opção de testes no CMake da série 2.30 (não existe SDL_TEST_LIBRARY)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 # SDL 2.30.8: igual à série 2.30 usada pelo upstream desktop, mas inclui a
 # correção oficial do ALooper_pollAll -> ALooper_pollOnce (obrigatória com
 # NDK r27; 2.30.3 falha ao compilar SDL_androidsensor.c no Android).
+
+# DRIFT GUARD — Java vendored x SDL C. O SDLActivity chama nativeGetVersion()
+# no startup e aborta com "SDL C/Java version mismatch" se as versões
+# divergirem (falha que só aparece NO DEVICE, não no build). Ao subir a
+# SDL2_VERSION, sincronize android/app/src/main/java/org/libsdl/app com o
+# android-project/app/src/main/java de dentro do tarball da SDL.
+set(SDL_JAVA_ACTIVITY "${CMAKE_CURRENT_SOURCE_DIR}/src/main/java/org/libsdl/app/SDLActivity.java")
+file(READ "${SDL_JAVA_ACTIVITY}" _sdl_java_src)
+set(_sdl_java_ver "")
+foreach(_comp MAJOR MINOR MICRO)
+    string(REGEX MATCH "SDL_${_comp}_VERSION *= *([0-9]+)" _sdl_java_m "${_sdl_java_src}")
+    if(NOT _sdl_java_m)
+        message(FATAL_ERROR
+            "SDLActivity.java vendored não declara SDL_${_comp}_VERSION — "
+            "restaure os arquivos android-project da SDL ${SDL2_VERSION} em "
+            "android/app/src/main/java/org/libsdl/app")
+    endif()
+    list(APPEND _sdl_java_ver "${CMAKE_MATCH_1}")
+endforeach()
+string(REPLACE "." ";" _sdl_c_ver "${SDL2_VERSION}")
+list(GET _sdl_c_ver 0 _sdl_c_major)
+list(GET _sdl_c_ver 1 _sdl_c_minor)
+list(GET _sdl_c_ver 2 _sdl_c_micro)
+list(GET _sdl_java_ver 0 _sdl_j_major)
+list(GET _sdl_java_ver 1 _sdl_j_minor)
+list(GET _sdl_java_ver 2 _sdl_j_micro)
+if(NOT (_sdl_j_major STREQUAL _sdl_c_major
+        AND _sdl_j_minor STREQUAL _sdl_c_minor
+        AND _sdl_j_micro STREQUAL _sdl_c_micro))
+    message(FATAL_ERROR
+        "SDL Java vendored (${_sdl_j_major}.${_sdl_j_minor}.${_sdl_j_micro}) != SDL C ${SDL2_VERSION} "
+        "— o app quebraria no startup com 'SDL C/Java version mismatch'. "
+        "Sincronize android/app/src/main/java/org/libsdl/app com o android-project da SDL ${SDL2_VERSION}")
+endif()
+message(STATUS "SDL2 ${SDL2_VERSION}: Java vendored confere (${_sdl_j_major}.${_sdl_j_minor}.${_sdl_j_micro})")
+
 FetchContent_Declare(sdl2
-    URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.8/SDL2-2.30.8.tar.gz
+    URL https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz
     URL_HASH SHA256=380c295ea76b9bd72d90075793971c8bcb232ba0a69a9b14da4ae8f603350058
 )
 FetchContent_MakeAvailable(sdl2)

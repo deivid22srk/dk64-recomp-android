@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- ============================================================
-         Baseado no template android-project do SDL 2.30.3 (vendored).
+         Baseado no template android-project do SDL 2.30.8 (vendored).
          - SDL renderiza em SurfaceView própria; hardwareAccelerated segue
            o template ("true") — não interfere na superfície do SDL.
          - uses-feature required=false: não filtrar dispositivos sem
@@ -57,7 +57,7 @@
             </intent-filter>
         </activity>
 
-        <!-- SDLActivity (fluxo padrão do SDL 2.30.3; sem overrides de ciclo de vida). -->
+        <!-- SDLActivity (fluxo padrão do SDL 2.30.8; sem overrides de ciclo de vida). -->
         <activity
             android:name=".MainActivity"
             android:exported="false"

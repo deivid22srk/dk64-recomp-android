@@ -1,7 +1,8 @@
 /*
  * android_paths.cpp — resolução de caminhos para o port Android.
  *
- * Contrato de argv com o SDL 2.30.3: SDL_android.c (nativeRunMain) monta
+ * Contrato de argv com o SDL 2.30.8 (idêntico na série 2.30): SDL_android.c
+ * (nativeRunMain) monta
  * argv[0]="app_process" e copia o array retornado por getArguments() do
  * MainActivity a partir de argv[1] ("arguments AFTER the application name"):
  *   argv[1] = internal files dir  (filesDir)
