@@ -106,6 +106,41 @@ Correções aplicadas:
    extension: ...`) agora aparecem no logcat — antes sumiam em `/dev/null` em
    builds release, o que tornou este diagnóstico impossível no 1º round.
 
+## 2.2 Bug real em campo (2º round): o probe recusava QUALQUER driver em ~1 ms
+
+Com o parsing da 2.1 corrigido, o teste em campo revelou um segundo bug,
+este do **probe** (seção 3.6): logo após instalar o driver, a SetupActivity
+recebia `"error":"driver não carregado"` em ~1 ms e fazia rollback da
+seleção — para **qualquer** driver, inclusive builds Turnip válidos.
+
+Causa raiz: o probe é uma chamada **JNI na SetupActivity**, que roda **antes
+do `main()` do jogo**. O caminho do `filesDir` usado pelo nativo
+(`androidport::internal_files_dir()`) só é preenchido por `init_from_args()`
+com o argv injetado pelo SDL (`nativeRunMain`) — que **nunca executou** nesse
+momento. Com o caminho vazio, `files/driver/selected.txt` nunca era
+encontrado, o nativo concluía "nenhum driver selecionado" e o probe devolvia
+"driver não carregado" sem nem tentar carregar o driver. O logcat denunciava:
+`Driver instalado` e `Probe do driver` separados por 1 ms — tempo impossível
+para namespace do linker + dlopen + criação de `VkInstance`.
+
+Correção (paridade com o port redahm-android, validado no mesmo aparelho):
+
+1. A JNI `nativeProbeCustomDriver` passou a receber os paths do Java
+   (`getFilesDir()` e `ApplicationInfo.nativeLibraryDir`) e os injeta via
+   `androidport::set_runtime_paths()` **antes** de qualquer uso. Como Setup e
+   jogo compartilham o mesmo processo, o valor também serve ao carregamento
+   no início do jogo.
+2. `hookLibDir` agora é **`nativeLibraryDir` vindo do Java** — exatamente o
+   valor que a documentação do adrenotools exige — com o scan de
+   `/proc/self/maps` mantido apenas como fallback.
+3. Pré-validação com logs: `stat` do arquivo exato que o adrenotools vai
+   abrir (`customDriverDir + customDriverName`), com `errno`; sem isso uma
+   instalação corrompida virava "driver não carregado" sem pista alguma.
+4. Flags em paridade com o redahm: apenas `ADRENOTOOLS_DRIVER_CUSTOM`. O
+   Turnip usa kgsl (`/dev/kgsl-3d0`) e não precisa do redirect de `fopen`;
+   o hook extra (`libfile_redirect_hook.so`) no namespace do driver era um
+   modo de falha sem benefício.
+
 ## 3. Arquitetura da integração
 
 ```text
@@ -127,16 +162,23 @@ SetupActivity (Kotlin)                    custom_driver.cpp (nativo)            
   (botão **INICIAR JOGO**) para que esta tela continue acessível em todo
   launch — antes o handoff era automático e, num device com crash, o usuário
   jamais veria o seletor (loop de crash).
-- O zip (formato do ecossistema adrenotools) pode ter os arquivos na raiz ou
-  em subdiretório; o parser usa o **diretório do `meta.json`** como raiz e
-  extrai tudo abaixo dele. Campos suportados do `meta.json`:
-  `libraryName` (fallback: `library`), `name`, `driverVersion`, `vendor`,
-  `author`, `minApi` (validado contra `Build.VERSION.SDK_INT`),
-  `schemaVersion` (ignorado).
-- Duas passadas no zip (`ZipInputStream`): 1ª localiza/lê o `meta.json`,
-  2ª extrai. Limites anti zip-bomb: 128 entradas, 512 MB descompactados.
-- Proteção **zip-slip**: rejeita `..`, caminhos absolutos e valida
-  `canonicalPath` de cada arquivo extraído.
+- **Formatos aceitos** (paridade com redahm-android, que carrega drivers sem
+  problemas no moto g34 5G):
+  1. `.zip` **adrenotools** (`meta.json` + `vulkan.ad*.so`): 1ª passada
+     localiza/lê o `meta.json` (raiz ou subdiretório — o diretório dele é a
+     raiz de extração); 2ª passada extrai. Campos suportados: `libraryName`
+     (fallback `library`), `name`, `driverVersion`, `vendor`, `author`,
+     `minApi` (validado contra `Build.VERSION.SDK_INT`), `schemaVersion`
+     (ignorado).
+  2. `.zip` **Winlator/WN-Turnip** (SEM `meta.json`, libs em subpastas):
+     extrai todos os `*.so` **achatados na raiz** da instalação (mantém a 1ª
+     cópia de cada basename) e autodetecta o soname — preferência:
+     `libvulkan_freedreno.so` → `libvulkan_turnip.so` →
+     `libvulkan.so.qualcomm` → `libvulkan*`/`vulkan.*` → qualquer `.so` que
+     não seja o `libllvm-glnext` do Mesa.
+  3. `.so` solto: copiado como driver de arquivo único.
+- Limites anti zip-bomb: 128 entradas, 512 MB descompactados. Proteção
+  **zip-slip**: rejeita `..`, caminhos absolutos e valida `canonicalPath`.
 - Falha em qualquer validação → apaga o diretório parcial e reporta erro.
 - Seleção gravada em `filesDir/driver/selected.txt` no formato `KEY=VALUE`
   (`dir=`, `library=`, `name=`) — mesmo formato que o nativo lê; instalar um
@@ -156,10 +198,14 @@ SetupActivity (Kotlin)                    custom_driver.cpp (nativo)            
   mudou, recarrega do zero (incluindo probe). Assim trocar de driver no Setup
   na mesma sessão do processo funciona — sem isso o resultado antigo ficaria
   em cache (`call_once` do 1º design).
-- `hookLibDir` (`nativeLibraryDir`) é derivado de `/proc/self/maps` com o
-  parsing corrigido (seção 2.1) e validado por `stat` dos hooks.
-  `tmpLibDir` (`driver/tmp`) e `fileRedirectDir` (`driver/cache`, cache de
-  shaders do Turnip) são criados sob o filesDir.
+- `hookLibDir` é **`ApplicationInfo.nativeLibraryDir` vindo do Java** (JNI,
+  `set_runtime_paths` — seção 2.2), que é o valor exato exigido pela
+  documentação do adrenotools; o parsing corrigido de `/proc/self/maps`
+  (seção 2.1) ficou como fallback. `tmpLibDir` (`driver/tmp`) é criado sob o
+  filesDir (só usado em API < 29, onde não há memfd).
+- Flags do `adrenotools_open_libvulkan`: **`ADRENOTOOLS_DRIVER_CUSTOM`
+  apenas** (paridade redahm — seção 2.2). Pré-validação com log de `errno`
+  no `stat` do arquivo do driver antes da chamada.
 - Qualquer falha (sem seleção, diretório inválido, `adrenotools_open_libvulkan`
   nulo, `dlsym` vazio, probe sem GPU) → `NULL` e o jogo segue com o **driver
   do sistema**. Logs em `adb logcat -s DK64Recomp`.
@@ -224,8 +270,9 @@ driver é **testado antes de entrar em vigor**:
 3. Probe OK → o nome da GPU e a versão da API aparecem na UI ("Driver
    verificado: Adreno (TM) 619 (Vulkan 1.3.x)") e no logcat.
 
-A JNI `SetupActivity.nativeProbeCustomDriver()` (mesmo libmain.so do jogo,
-carregado no `static {}` do Setup) devolve o resultado em JSON:
+A JNI `SetupActivity.nativeProbeCustomDriver(filesDir, nativeLibraryDir)`
+(mesmo libmain.so do jogo, carregado no `static {}` do Setup) recebe os
+paths do Java (bug da seção 2.2) e devolve o resultado em JSON:
 `{"active":bool,"ok":bool,"devices":int,"device":str,"api":str,"error":str}`.
 O probe roda uma vez por seleção (fingerprint), então instalar outro driver
 na mesma sessão reavalia tudo.
@@ -242,16 +289,18 @@ extension: X` ficam visíveis em `adb logcat -s DK64Recomp-stderr`.
 
 ## 4. Como usar (resumo para o usuário)
 
-1. Baixe um driver Turnip no formato adrenotools — ex.: releases
-   [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers)
-   (`Turnip_vX.Y.Z_R*.zip`; existem variantes `Gmem`/`Sysmem`).
+1. Baixe um driver Turnip — ex.:
+   - releases [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers)
+     (`Turnip_vX.Y.Z_R*.zip`; variantes `Gmem`/`Sysmem`);
+   - zips Winlator/WN-Turnip (ex.: `WN-Turnip-*.zip`) também são aceitos —
+     o app autodetecta o soname mesmo sem `meta.json`.
    **Escolha a pasta da geração da sua GPU**: Adreno 6xx (ex.: Adreno 619 do
    moto g34 5G) → builds **a6xx**; Adreno 7xx → **a7xx**. Builds de outra
    geração são recusados automaticamente pelo app.
-2. Abra o app → **Instalar driver (.zip)…** → selecione o zip. O app instala,
-   carrega e **testa** o driver: se listar a GPU (ex.: "Driver verificado:
-   Adreno (TM) 619"), está pronto; se não listar nenhuma GPU Vulkan, a
-   instalação é recusada com instruções.
+2. Abra o app → **Instalar driver (.zip)…** → selecione o zip (ou um `.so`
+   de driver). O app instala, carrega e **testa** o driver: se listar a GPU
+   (ex.: "Driver verificado: Adreno (TM) 619"), está pronto; se não listar
+   nenhuma GPU Vulkan, a instalação é recusada com instruções.
 3. Toque em **INICIAR JOGO**. O driver entra em vigor neste início (o nativo
    lê a seleção quando o `SDL_main` sobe).
 4. Para voltar ao driver proprietário: **Remover driver**.

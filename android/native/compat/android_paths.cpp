@@ -28,6 +28,7 @@ namespace androidport {
 namespace {
 std::string g_internal;
 std::string g_external;
+std::string g_native_lib_dir;
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "DK64Recomp", __VA_ARGS__)
 
@@ -46,6 +47,18 @@ bool ends_with_ci(const std::string& s, const char* suffix) {
 
 const std::string& internal_files_dir() { return g_internal; }
 const std::string& external_files_dir() { return g_external; }
+const std::string& native_library_dir() { return g_native_lib_dir; }
+
+void set_runtime_paths(const char* internal_dir, const char* native_lib_dir) {
+    if (internal_dir && internal_dir[0]) {
+        g_internal = internal_dir;
+        ALOGI("paths (JNI): internal=%s", internal_dir);
+    }
+    if (native_lib_dir && native_lib_dir[0]) {
+        g_native_lib_dir = native_lib_dir;
+        ALOGI("paths (JNI): nativeLibraryDir=%s", native_lib_dir);
+    }
+}
 
 /*
  * Pipa o stderr do processo para o logcat. O plume/RT64 reportam falhas de

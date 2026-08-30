@@ -15,6 +15,21 @@ const std::string& internal_files_dir();
 // /storage/emulated/0/Android/data/<pkg>/files (onde o usuário coloca a ROM)
 const std::string& external_files_dir();
 
+// Diretório das libs nativas do APK (ApplicationInfo.nativeLibraryDir).
+// Injetado via JNI pelo SetupActivity (set_runtime_paths) — é exatamente o
+// valor que o libadrenotools exige como hookLibDir. Pode ficar vazio até a
+// 1ª injeção (aí custom_driver.cpp faz fallback ao scan de /proc/self/maps).
+const std::string& native_library_dir();
+
+/*
+ * Injeta os paths ANTES do main() (JNI do SetupActivity). O probe de driver
+ * roda na SetupActivity, onde init_from_args() ainda não executou — sem isso
+ * internal_files_dir() estaria vazio e o nativo jamais encontraria
+ * files/driver/selected.txt ("driver não carregado" instantâneo).
+ * Parâmetros null/vazios preservam o valor atual.
+ */
+void set_runtime_paths(const char* internal_dir, const char* native_lib_dir);
+
 // Chamado uma única vez no início do main() no Android.
 void init_from_args(int argc, char** argv);
 

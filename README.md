@@ -99,18 +99,19 @@ yuzu/sudachi e os ports de recompilados com RT64): você pode instalar um
 driver **Mesa Turnip** em .zip e o jogo passa a usá-lo no lugar do driver do
 sistema.
 
-1. Baixe um driver no formato adrenotools — ex.:
-   [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers)
-   (`Turnip_vX.Y.Z_R*.zip`; há variantes `Gmem`/`Sysmem`).
+1. Baixe um driver Turnip — formatos aceitos: `.zip` **adrenotools** (ex.:
+   [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers),
+   `Turnip_vX.Y.Z_R*.zip`, variantes `Gmem`/`Sysmem`), `.zip` **Winlator/**
+   **WN-Turnip** (sem `meta.json` — o app autodetecta o soname) ou `.so` solto.
    **Atenção à geração da GPU**: os zips são por geração — Adreno 6xx
    (ex.: Adreno 619 do moto g34 5G) usa os builds **a6xx**; builds a7xx/a8xx
    não expõem GPU neste aparelho.
-2. No app: **Instalar driver (.zip)…** → selecione o zip. O app **testa** o
-   driver na hora (cria uma `VkInstance` e enumera as GPUs, o mesmo caminho do
-   RT64): se listar a GPU (“Driver verificado: Adreno (TM) 619…”), está
-   pronto; se não listar nenhuma GPU Vulkan, a instalação é **recusada** com
-   instruções — sem isso o jogo falharia com “Unable to find compatible
-   graphics device”.
+2. No app: **Instalar driver (.zip)…** → selecione o zip (ou `.so`). O app
+   **testa** o driver na hora (cria uma `VkInstance` e enumera as GPUs, o
+   mesmo caminho do RT64): se listar a GPU (“Driver verificado: Adreno (TM)
+   619…”), está pronto; se não listar nenhuma GPU Vulkan, a instalação é
+   **recusada** com instruções — sem isso o jogo falharia com “Unable to find
+   compatible graphics device”.
 3. Toque em **INICIAR JOGO**.
 4. Para voltar ao driver do sistema: **Remover driver**.
 

@@ -2,10 +2,13 @@
  * custom_driver.cpp — implementação da ponte libadrenotools (driver Turnip).
  *
  * Referências de uso do adrenotools_open_libvulkan(): Vita3K
- * (vita3k/util/src/android_driver.cpp) e yuzu/sudachi (GpuDriverHelper) —
- * parâmetros idênticos: RTLD_NOW, flags CUSTOM|FILE_REDIRECT, tmpLibDir
- * gravável, hookLibDir = nativeLibraryDir, dir do driver com barra final,
- * soname do .so (campo "libraryName"/"library" do meta.json do zip).
+ * (vita3k/util/src/android_driver.cpp), yuzu/sudachi (GpuDriverHelper) e o
+ * port redahm-android (deivid22srk) — este último validado no moto g34 5G
+ * (Adreno 619) e usado como base de paridade: paths vindo do Java,
+ * hookLibDir = ApplicationInfo.nativeLibraryDir (exigência documentada do
+ * adrenotools), flags apenas ADRENOTOOLS_DRIVER_CUSTOM (Turnip/kgsl não
+ * precisa de FILE_REDIRECT — um hook a menos, um modo de falha a menos) e
+ * importação que tolera zips Winlator/WN-Turnip sem meta.json.
  *
  * Requisito do adrenotools: o app PRECISA empacotar os hooks
  * (libmain_hook.so/libhook_impl.so/libfile_redirect_hook.so) e extrair os
@@ -17,12 +20,22 @@
  * Se nenhum dispositivo aparecer (build sem suporte à GPU do aparelho), o
  * driver é descartado e o jogo usa o driver do sistema — e o SetupActivity
  * recusa o driver com mensagem clara via JNI (nativeProbeCustomDriver).
+ *
+ * BUG CORRIGIDO (2º release do driver): o probe roda na SetupActivity via
+ * JNI, ANTES do main() do jogo. internal_files_dir() só é preenchido por
+ * init_from_args() (argv do SDL), que ainda não executou nesse momento —
+ * com o files dir vazio, selected.txt nunca era encontrado, o nativo nem
+ * tentava carregar o driver e o probe devolvia "driver não carregado" em
+ * ~1 ms, rejeitando QUALQUER driver (rollback automático no Java). Correção:
+ * o JNI agora recebe filesDir e nativeLibraryDir do Java (set_runtime_paths)
+ * e funciona tanto no Setup quanto no jogo (mesmo processo).
  */
 #include "custom_driver.h"
 
 #ifdef __ANDROID__
 
 #include <android/log.h>
+#include <cerrno>
 #include <dlfcn.h>
 #include <jni.h>
 #include <sys/stat.h>
@@ -323,32 +336,71 @@ void ensure_loaded_locked() {
         return;
     }
 
+    /*
+     * hookLibDir: o adrenotools EXIGE exatamente ApplicationInfo
+     * .nativeLibraryDir. Preferimos o valor injetado pelo Java via JNI
+     * (set_runtime_paths — paridade com redahm-android); o scan de
+     * /proc/self/maps continua como fallback para o caso do probe ser
+     * chamado sem os paths (ou de um contexto sem JNI).
+     */
     std::string hook_lib_dir;
-    if (!find_native_library_dir(hook_lib_dir)) {
-        ALOGE("custom driver: nativeLibraryDir não encontrado em /proc/self/maps");
+    const std::string &java_nld = androidport::native_library_dir();
+    if (!java_nld.empty()) {
+        struct stat stHook;
+        if (stat((java_nld + "/libmain_hook.so").c_str(), &stHook) == 0 &&
+            stat((java_nld + "/libhook_impl.so").c_str(), &stHook) == 0) {
+            hook_lib_dir = java_nld;
+        } else {
+            ALOGE("custom driver: hooks ausentes em nativeLibraryDir='%s' "
+                  "(APK sem useLegacyPackaging?) — tentando /proc/self/maps",
+                  java_nld.c_str());
+        }
+    }
+    if (hook_lib_dir.empty() && !find_native_library_dir(hook_lib_dir)) {
+        ALOGE("custom driver: nativeLibraryDir não resolvido (JNI vazio + "
+              "libmain.so ausente em /proc/self/maps)");
         return;
     }
 
-    // Diretórios graváveis exigidos pelo adrenotools/turnip.
+    // Diretório gravável exigido pelo adrenotools (só usado em API < 29,
+    // onde não há memfd; mantido por segurança).
     const std::string tmp_lib_dir = files + "/driver/tmp";
-    const std::string file_redirect_dir = files + "/driver/cache";
     mkdir(tmp_lib_dir.c_str(), 0755);
-    mkdir(file_redirect_dir.c_str(), 0755);
 
     // O adrenotools espera o diretório do driver com barra final.
     std::string driver_dir = sel.dir;
     if (driver_dir.back() != '/') driver_dir += '/';
 
-    ALOGI("custom driver: carregando '%s' (lib=%s) de %s", sel.name.c_str(), sel.library.c_str(), driver_dir.c_str());
+    /*
+     * Pré-validação (espelha as checagens internas do adrenotools, que falham
+     * retornando nullptr SEM nenhum log): stat do arquivo exato que ele vai
+     * abrir. Sem isso um caminho errado vira "driver não carregado" sem
+     * nenhuma pista no logcat.
+     */
+    const std::string driver_file = driver_dir + sel.library;
+    struct stat stDriver;
+    if (stat(driver_file.c_str(), &stDriver) != 0) {
+        ALOGE("custom driver: ARQUIVO DO DRIVER INEXISTENTE: '%s' (errno=%d) — "
+              "instalação corrompida ou soname errado; abortando",
+              driver_file.c_str(), errno);
+    }
 
+    ALOGI("custom driver: carregando '%s' (lib=%s) de %s | hookLibDir=%s | "
+          "flags=CUSTOM", sel.name.c_str(), sel.library.c_str(),
+          driver_dir.c_str(), hook_lib_dir.c_str());
+
+    // Paridade redahm-android: apenas ADRENOTOOLS_DRIVER_CUSTOM. O Turnip
+    // usa kgsl (/dev/kgsl-3d0) e não precisa do redirect de fopen; o hook
+    // extra (libfile_redirect_hook.so) no namespace do driver era um modo
+    // de falha sem benefício.
     void *handle = adrenotools_open_libvulkan(
         RTLD_NOW,
-        ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_DRIVER_FILE_REDIRECT,
+        ADRENOTOOLS_DRIVER_CUSTOM,
         tmp_lib_dir.c_str(),
         hook_lib_dir.c_str(),
         driver_dir.c_str(),
         sel.library.c_str(),
-        file_redirect_dir.c_str(),
+        nullptr,
         nullptr);
 
     if (handle == nullptr) {
@@ -406,8 +458,13 @@ int dk64_adrenotools_custom_driver_active(void) {
 
 /*
  * JNI — chamado pelo SetupActivity logo após instalar/selecionar um driver
- * (e disponível para diagnóstico). Carrega o driver (se necessário), roda o
- * probe e devolve um JSON:
+ * (e disponível para diagnóstico). Recebe os paths do Java (getFilesDir e
+ * ApplicationInfo.nativeLibraryDir) e os injeta via set_runtime_paths ANTES
+ * de qualquer uso — sem isso internal_files_dir() estaria vazio aqui, pois
+ * init_from_args() só roda no main() do jogo (bug do 2º release: o probe
+ * devolvia "driver não carregado" para QUALQUER driver em ~1 ms).
+ *
+ * Devolve um JSON:
  *
  *   {"active":true,"ok":true,"devices":1,
  *    "device":"Adreno (TM) 619","api":"1.3.280","error":""}
@@ -420,7 +477,15 @@ int dk64_adrenotools_custom_driver_active(void) {
  * jogo falhar com "Unable to find compatible graphics device".
  */
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_deivid22srk_dk64recomp_SetupActivity_nativeProbeCustomDriver(JNIEnv *env, jclass /*clazz*/) {
+Java_com_deivid22srk_dk64recomp_SetupActivity_nativeProbeCustomDriver(JNIEnv *env, jclass /*clazz*/,
+                                                                      jstring jFilesDir,
+                                                                      jstring jNativeLibDir) {
+    const char *files = jFilesDir ? env->GetStringUTFChars(jFilesDir, nullptr) : nullptr;
+    const char *nld = jNativeLibDir ? env->GetStringUTFChars(jNativeLibDir, nullptr) : nullptr;
+    androidport::set_runtime_paths(files, nld);
+    if (files) env->ReleaseStringUTFChars(jFilesDir, files);
+    if (nld) env->ReleaseStringUTFChars(jNativeLibDir, nld);
+
     std::lock_guard<std::mutex> lock(g_stateMutex);
     ensure_loaded_locked();
 

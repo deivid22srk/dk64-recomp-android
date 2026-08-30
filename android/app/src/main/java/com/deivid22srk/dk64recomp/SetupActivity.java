@@ -22,6 +22,7 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -44,12 +45,15 @@ import java.util.zip.ZipInputStream;
  * Assim o MainActivity (SDLActivity) nunca inicia sem ROM/assets e não
  * precisamos de recreate() nem de manipular estado estático do SDL.
  *
- * Driver Vulkan custom (Turnip): o usuário pode instalar um driver .zip
- * (formato adrenotools — meta.json + vulkan.ad*.so, ex. K11MCH1/AdrenoToolsDrivers)
- * aqui no Setup. O zip é extraído para filesDir/driver/installed/<id>/ e a
- * seleção gravada em filesDir/driver/selected.txt (KEY=VALUE), lida pelo nativo
- * (custom_driver.cpp) no início do SDL_main — por isso o início do jogo agora é
- * manual (botão INICIAR JOGO), garantindo acesso a esta tela em todo launch.
+ * Driver Vulkan custom (Turnip): o usuário pode instalar um driver aqui no
+ * Setup — .zip adrenotools (meta.json + vulkan.ad*.so, ex.
+ * K11MCH1/AdrenoToolsDrivers), .zip Winlator/WN-Turnip (sem meta.json, libs
+ * em subpastas — soname autodetectado) ou .so solto. Extração em
+ * filesDir/driver/installed/<id>/ e seleção em filesDir/driver/selected.txt
+ * (KEY=VALUE), lida pelo nativo (custom_driver.cpp). O driver é VALIDADO no
+ * ato (probe JNI com paths do Java — roda antes do main()) e o início do
+ * jogo é manual (botão INICIAR JOGO), garantindo acesso a esta tela em todo
+ * launch.
  */
 public class SetupActivity extends Activity {
 
@@ -78,10 +82,13 @@ public class SetupActivity extends Activity {
     /**
      * Valida o driver selecionado (custom_driver.cpp): carrega o Turnip via
      * adrenotools, cria uma VkInstance e enumera os dispositivos físicos — o
-     * MESMO caminho que o RT64 executará ao iniciar o jogo. Retorna JSON:
+     * MESMO caminho que o RT64 executará ao iniciar o jogo. Recebe os paths
+     * do app porque roda ANTES do main() do jogo (sem eles o nativo não sabia
+     * onde ficava files/driver/selected.txt e recusava qualquer driver).
+     * Retorna JSON:
      * {"active":bool,"ok":bool,"devices":int,"device":str,"api":str,"error":str}
      */
-    private static native String nativeProbeCustomDriver();
+    private static native String nativeProbeCustomDriver(String filesDir, String nativeLibraryDir);
 
     private TextView mStatus;
     private Button mPickButton;
@@ -183,8 +190,10 @@ public class SetupActivity extends Activity {
         TextView driverHint = new TextView(this);
         driverHint.setText("Em alguns dispositivos o driver proprietário Adreno tem bugs "
                 + "(ex.: crash em vkGetRefreshCycleDurationGOOGLE). Um driver Turnip "
-                + "(Mesa) pode corrigir. Formato: .zip adrenotools (meta.json + vulkan.ad*.so), "
-                + "ex.: K11MCH1/AdrenoToolsDrivers no GitHub. Requer arm64 + Android 10+.\n\n"
+                + "(Mesa) pode corrigir. Formatos aceitos: .zip adrenotools "
+                + "(meta.json + vulkan.ad*.so, ex. K11MCH1/AdrenoToolsDrivers), "
+                + ".zip Winlator/WN-Turnip (sem meta.json) e .so solto. "
+                + "Requer arm64 + Android 10+.\n\n"
                 + "Importante: use um build para a geração da sua GPU — em Adreno 6xx "
                 + "(ex.: Adreno 619) use os builds 'a6xx'; builds a7xx/a8xx não expõem "
                 + "GPU neste aparelho. O driver é testado aqui mesmo após instalar; se "
@@ -463,8 +472,9 @@ public class SetupActivity extends Activity {
         if (name == null) name = "driver.zip";
         name = name.substring(name.lastIndexOf('/') + 1).trim();
         String lower = name.toLowerCase();
-        if (!lower.endsWith(".zip")) {
-            toast("Selecione um .zip de driver (formato adrenotools, ex.: Turnip).");
+        if (!lower.endsWith(".zip") && !lower.endsWith(".so")) {
+            toast("Selecione um .zip de driver (adrenotools ou Winlator/Turnip) "
+                    + "ou um .so de driver.");
             return;
         }
         installDriverAsync(uri, name);
@@ -489,7 +499,11 @@ public class SetupActivity extends Activity {
                 // graphics device".
                 String probeJson = null;
                 try {
-                    probeJson = nativeProbeCustomDriver();
+                    // Paths do app: o probe roda antes do main() do jogo, então o
+                    // nativo ainda não conhece filesDir — e nativeLibraryDir é
+                    // exatamente o hookLibDir exigido pelo libadrenotools.
+                    probeJson = nativeProbeCustomDriver(getFilesDir().getAbsolutePath(),
+                            getApplicationInfo().nativeLibraryDir);
                 } catch (Throwable t) {
                     Log.w(TAG, "Probe nativo indisponível — driver aceito sem validação", t);
                 }
@@ -522,8 +536,10 @@ public class SetupActivity extends Activity {
                         clearDriverSelection();
                         error = "Driver \"" + meta.name + "\" não pôde ser carregado"
                                 + (probeError.isEmpty() ? "" : ": " + probeError)
-                                + ". O jogo usará o driver do sistema. Verifique se o zip é do "
-                                + "formato adrenotools (arm64) e tente outro build.";
+                                + ". O jogo usará o driver do sistema. Confira se o zip "
+                                + "é arm64 (formato adrenotools com meta.json, Winlator/Turnip "
+                                + "ou .so) e se o build corresponde à geração da sua GPU; "
+                                + "veja o logcat (tag DK64Recomp) para o motivo exato.";
                     }
                 }
             } catch (Exception ex) {
@@ -566,7 +582,17 @@ public class SetupActivity extends Activity {
         if (mDriverStatus != null) mDriverStatus.setText(text);
     }
 
-    /** Extrai, valida e seleciona o driver. Lança Exception com mensagem amigável. */
+    /**
+     * Extrai, valida e seleciona o driver. Lança Exception com mensagem amigável.
+     *
+     * Formatos aceitos (paridade com redahm-android, que carrega drivers sem
+     * problemas no moto g34 5G):
+     *  - .zip adrenotools (meta.json + vulkan.ad*.so): extrai sob o prefixo do
+     *    meta.json e usa o soname dele (libraryName/library);
+     *  - .zip Winlator/WN-Turnip (SEM meta.json, libs em subpastas): extrai
+     *    todos os *.so ACHATADOS na raiz e autodetecta o soname;
+     *  - .so solto: copiado como driver de arquivo único.
+     */
     private DriverMeta installDriver(Uri uri, String displayName) throws Exception {
         File base = new File(getFilesDir(), DRIVER_BASE);
         File installedRoot = new File(base, DRIVER_INSTALLED);
@@ -580,43 +606,83 @@ public class SetupActivity extends Activity {
             throw new IOException("não foi possível criar " + target);
         }
 
-        String prefix;
-        JSONObject meta;
         try {
-            // 1ª passada: localizar meta.json e ler o JSON
-            try (InputStream in = getContentResolver().openInputStream(uri)) {
-                if (in == null) throw new IOException("não foi possível abrir o arquivo");
-                Object[] found = findMetaJson(in);
-                if (found == null) {
-                    throw new IOException("meta.json não encontrado no zip (formato adrenotools?)");
+            String library;
+            String friendly = displayName;
+            int minApi = 0;
+            String lower = displayName.toLowerCase();
+
+            if (lower.endsWith(".so")) {
+                // Driver de arquivo único (.so solto)
+                String soName = sanitizeId(displayName);
+                if (!soName.toLowerCase().endsWith(".so")) soName = soName + ".so";
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new IOException("não foi possível abrir o arquivo");
+                    copyStreamTo(in, new File(target, soName));
                 }
-                prefix = (String) found[0];
-                meta = new JSONObject((String) found[1]);
+                library = soName;
+            } else {
+                // 1ª passada: meta.json é OPCIONAL (zips Winlator/WN não têm)
+                String prefix = null;
+                JSONObject meta = null;
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new IOException("não foi possível abrir o arquivo");
+                    Object[] found = findMetaJson(in);
+                    if (found != null) {
+                        prefix = (String) found[0];
+                        meta = new JSONObject((String) found[1]);
+                    }
+                }
+
+                if (meta != null) {
+                    // Formato adrenotools: extrai sob o prefixo do meta.json
+                    extractZipUnderPrefix(uri, prefix, target);
+                    minApi = meta.optInt("minApi", 0);
+                    library = meta.optString("libraryName", meta.optString("library", ""));
+                    if (library.isEmpty()) library = null;
+                    String metaName = meta.optString("name", "");
+                    if (!metaName.isEmpty()) friendly = metaName;
+                    else if (!meta.optString("driverVersion").isEmpty()) {
+                        friendly = "Turnip " + meta.optString("driverVersion");
+                    }
+                } else {
+                    // Sem meta.json: achata todos os *.so na raiz
+                    extractZipFlattened(uri, target);
+                    library = null;
+                    // Nome amigável: sem a extensão .zip
+                    if (lower.endsWith(".zip")) {
+                        friendly = displayName.substring(0, displayName.length() - 4);
+                    }
+                }
+
+                if (library == null) library = findPreferredDriverSo(target);
+                if (library == null || library.isEmpty()) {
+                    throw new IOException("nenhum .so de driver (libvulkan*/vulkan*) "
+                            + "encontrado no arquivo");
+                }
+
+                // Tolerância: soname do meta dentro de subpasta — traz p/ raiz
+                File libFile = new File(target, library);
+                if (!libFile.isFile() || libFile.length() == 0) {
+                    File nested = findFileRecursively(target, library);
+                    if (nested != null) {
+                        copyStreamTo(new FileInputStream(nested), libFile);
+                    } else {
+                        throw new IOException(".so do driver ('" + library
+                                + "') não veio no arquivo");
+                    }
+                }
             }
 
-            String library = meta.optString("libraryName", meta.optString("library", ""));
-            if (library.isEmpty()) {
-                throw new IOException("meta.json sem campo libraryName/library");
-            }
-            int minApi = meta.optInt("minApi", 0);
             if (minApi > Build.VERSION.SDK_INT) {
                 throw new IOException("driver exige Android " + minApi + "+ (este device: "
                         + Build.VERSION.SDK_INT + ")");
             }
 
-            // 2ª passada: extrair tudo que está sob o prefixo do meta.json
-            extractZipUnderPrefix(uri, prefix, target);
-
-            File libFile = new File(target, library);
-            if (!libFile.isFile() || libFile.length() == 0) {
-                throw new IOException(".so do driver ('" + library + "') não veio no zip");
-            }
-
             DriverMeta out = new DriverMeta();
             out.dir = target.getAbsolutePath();
             out.library = library;
-            out.name = meta.optString("name", !meta.optString("driverVersion").isEmpty()
-                    ? "Turnip " + meta.optString("driverVersion") : displayName);
+            out.name = friendly;
 
             // Seleção (KEY=VALUE, lido pelo nativo)
             StringBuilder sb = new StringBuilder();
@@ -639,6 +705,91 @@ public class SetupActivity extends Activity {
             deleteRecursively(target);
             throw ex;
         }
+    }
+
+    /** Soname principal de um diretório de driver, ordem de preferência:
+     *  nomes conhecidos (Winlator/Turnip) → libvulkan*/vulkan.* → qualquer
+     *  .so que não seja o compilador LLVM do Mesa. */
+    private static String findPreferredDriverSo(File dir) {
+        File[] files = dir == null ? null : dir.listFiles();
+        if (files == null) return null;
+        for (String preferred : new String[]{"libvulkan_freedreno.so", "libvulkan_turnip.so",
+                "libvulkan.so.qualcomm"}) {
+            for (File f : files) {
+                if (f.isFile() && f.getName().equals(preferred)) return f.getName();
+            }
+        }
+        for (File f : files) {
+            String n = f.getName();
+            if (f.isFile() && (n.startsWith("libvulkan") || n.startsWith("vulkan."))) return n;
+        }
+        for (File f : files) {
+            String n = f.getName();
+            if (f.isFile() && n.endsWith(".so") && !n.contains("llvm")) return n;
+        }
+        for (File f : files) {
+            if (f.isFile() && f.getName().endsWith(".so")) return f.getName();
+        }
+        return null;
+    }
+
+    /**
+     * Extrai todos os *.so do zip ACHATADOS na raiz do target (formato dos
+     * pacotes Winlator/WN-Turnip, que guardam as libs em subpastas — ex.:
+     * "Turnip/25.x/libvulkan_freedreno.so"). Mantém a primeira cópia de cada
+     * basename: builds multi-variante repetem o mesmo soname por subpasta.
+     */
+    private void extractZipFlattened(Uri uri, File target) throws IOException {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("não foi possível reabrir o zip");
+            ZipInputStream zip = new ZipInputStream(in);
+            ZipEntry entry;
+            long total = 0;
+            int entries = 0;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) continue;
+                String base = new File(entry.getName()).getName();
+                if (!base.endsWith(".so")) continue;
+                if (++entries > MAX_DRIVER_ENTRIES) throw new IOException("zip com entradas demais");
+                File out = new File(target, base);
+                if (out.exists()) continue; // mantém a 1ª cópia (raiz tem precedência)
+                byte[] buf = new byte[1 << 16];
+                try (OutputStream os = new FileOutputStream(out)) {
+                    int n;
+                    while ((n = zip.read(buf)) > 0) {
+                        total += n;
+                        if (total > MAX_DRIVER_ZIP_BYTES) throw new IOException("driver maior que 512 MB");
+                        os.write(buf, 0, n);
+                    }
+                }
+                out.setReadable(true, false);
+                out.setExecutable(true, false);
+            }
+        }
+    }
+
+    private static void copyStreamTo(InputStream in, File out) throws IOException {
+        try (OutputStream os = new FileOutputStream(out)) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+        }
+    }
+
+    /** Procura um arquivo por basename em dir (recursivo) ou null. */
+    private static File findFileRecursively(File dir, String name) {
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isFile() && f.getName().equals(name)) return f;
+        }
+        for (File f : files) {
+            if (f.isDirectory()) {
+                File found = findFileRecursively(f, name);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /** Procura meta.json na raiz ou em subdiretórios. Retorna {prefixo, conteúdo} ou null. */
