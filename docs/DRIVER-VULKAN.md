@@ -191,6 +191,73 @@ Efeito colateral positivo: como a `vkCreateInstance` do probe agora roda de
 fato, o ICD Turnip é carregado já na instalação — o teste do probe passou a
 exercitar exatamente o mesmo caminho que o jogo usará.
 
+## 2.4 Bug real em campo (4º round): o SIGSEGV original nunca foi "do driver" — e a escolha de formato do swapchain
+
+Com o probe corrigido (2.3), o teste em campo confirmou o carregamento
+completo do Turnip — `custom driver probe: device[0] = 'Turnip Adreno (TM)
+619' (API Vulkan 1.3.354, vendor 0x5143)` — e o hook re aplicado no início
+do jogo (`hook_impl: loading custom driver: .../libvulkan_freedreno.so`).
+O jogo passou a inicializar o Vulkan com o Turnip de verdade (compilação de
+shaders Mesa visível no logcat via propriedades `vendor.mesa.spirv.*`) — e
+crashou de novo, com o MESMO offset do crash original:
+
+```text
+W DK64Recomp-stderr: No compatible surface formats were found.
+E vulkan  : VkGetPhysicalDeviceImageFormatProperties2 for AHB usage failed: -11
+W DK64Recomp-stderr: vkCreateSwapchainKHR failed with error code 0xC4653600.
+F libc    : Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 in tid (RT64 Present)
+F DEBUG   : #00 pc 000000000002b2e4 /memfd:/system/lib64/libvulkan.so (deleted)
+```
+
+### 2.4.1 Diagnóstico completo (reconstituição com todos os logcats)
+
+1. **O crash original nunca foi um bug do driver proprietário.** O offset
+   `0x2b2e4` em `vulkan::driver::GetRefreshCycleDurationGOOGLE` é do
+   **loader do framework** (`libvulkan.so` do sistema — a cópia `memfd` do
+   adrenotools é o MESMO binário carregado por `dlopen_unique`). Ele
+   desreferencia o handle do swapchain passado por parâmetro. Com
+   **swapchain NULL** o resultado é sempre esse SIGSEGV — com qualquer ICD.
+2. **Por que o swapchain era NULL?** Porque a criação do swapchain FALHAVA
+   antes, silenciosamente (antes do stderr→logcat não havia visibilidade):
+   `No compatible surface formats were found` — o plume não encontrava o
+   formato pedido pelo RT64 na lista de formatos da surface.
+3. **Por que o formato não estava na lista?** O RT64 pede
+   `B8G8R8A8_UNORM` (`rt64_application.cpp`). Os drivers deste aparelho
+   (proprietário **e** Turnip) expõem para a janela SDL o formato nativo
+   dela — `R8G8B8A8_UNORM` — e o loop de recriação do RT64 (`resize()`)
+   então tentava criar o swapchain com `pickedSurfaceFormat` ainda
+   `{VK_FORMAT_UNDEFINED}` (o upstream só escolhe formato no
+   `initialize()`), falhando em loop no `vkCreateSwapchainKHR`.
+4. **Confirmação externa:** o port redahm-android (mesmo aparelho, mesmo
+   zip Turnip, que o usuário reporta funcionar) escolhe o formato da
+   surface dinamicamente e **prefere `R8G8B8A8_UNORM` no Android**
+   (`vulkan_presenter.cpp`: `kFormat8888Primary = VK_FORMAT_R8G8B8A8_UNORM`
+   no branch `REX_PLATFORM_ANDROID`), com B8G8R8A8 como secundário. Ou
+   seja: o problema era a escolha fixa de formato do RT64/plume upstream,
+   não o driver.
+
+### 2.4.2 Correções no patch do plume
+
+1. **Fallback de formato da surface (Android)**: quando o formato pedido
+   (`B8G8R8A8_UNORM`) não estiver na lista, aceitar o primeiro formato de
+   32 bpp do mesmo layout de bytes (`R8G8B8A8_UNORM` → `B8G8R8A8_UNORM` →
+   variantes SRGB). RGBA8 e BGRA8 têm a mesma organização de bytes: o
+   pipeline de present do RT64 (fixado em B8G8R8A8_UNORM no upstream, ver
+   TODO em `rt64_shader_library.cpp`) escreve os componentes na mesma
+   ordem de bytes — não há troca de canais visível. Se a lista não tiver
+   nenhum deles, o erro agora loga a lista completa para diagnóstico.
+2. **`displayTiming = false` incondicional no Android**: a extensão
+   `VK_GOOGLE_display_timing` no Android é **emulada pelo loader do
+   framework**, que a lista como suportada para qualquer ICD — portanto
+   "extensão presente" não significa "implementada pelo driver". Com a
+   guard anterior (extensão + driver custom ativo) o RT64 habilitava o
+   display timing com o Turnip e consultava `vkGetRefreshCycleDuration
+   GOOGLE` — que crasha no loader deste aparelho quando o swapchain está
+   inválido (e é o mesmo código que crashou no run original). Com
+   `displayTiming` desligado, o RT64 usa o pacing pelo refresh rate do SDL
+   e o crash desaparece; a função `dk64_adrenotools_custom_driver_active`
+   deixou de ser referenciada no plume (segue exportada pela ponte nativa).
+
 ## 3. Arquitetura da integração
 
 ```text

@@ -19,7 +19,7 @@ index 9dcfedf..a657973 100644
      struct RenderWindow {
          Display* display;
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index f1dd503..aa8a432 100644
+index f1dd503..d8fcc26 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -10,6 +10,24 @@
@@ -35,12 +35,12 @@ index f1dd503..aa8a432 100644
 +#if defined(__ANDROID__)
 +// Port DK64-Recomp Android: ponte para o driver Vulkan custom (Turnip) via
 +// libadrenotools — implementado em android/native/compat/custom_driver.cpp.
-+// dk64_adrenotools_get_instance_proc_addr retorna o vkGetInstanceProcAddr do
-+// driver instalado pelo usuário (ou nullptr p/ usar o driver do sistema);
-+// dk64_adrenotools_custom_driver_active informa se o driver custom está em uso.
++// Retorna o vkGetInstanceProcAddr do driver instalado pelo usuário (ou
++// nullptr p/ usar o driver do sistema); volkInitializeCustom roteia a tabela
++// do volk para esse loader (um dlopen_unique do libvulkan do sistema cujo
++// hook carrega o ICD Turnip na criação da instância).
 +extern "C" {
 +void *dk64_adrenotools_get_instance_proc_addr(void);
-+int dk64_adrenotools_custom_driver_active(void);
 +}
 +#endif
 +
@@ -88,7 +88,53 @@ index f1dd503..aa8a432 100644
  #   elif defined(__ANDROID__)
          assert(desc.renderWindow != nullptr);
          VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
-@@ -2704,7 +2751,7 @@ namespace plume {
+@@ -2205,8 +2252,45 @@ namespace plume {
+         }
+ 
+         if (compatibleSurfaceFormats.empty()) {
++#if defined(__ANDROID__)
++            // Port DK64-Recomp Android: o RT64 pede B8G8R8A8_UNORM
++            // (rt64_application.cpp), mas drivers que só expõem o formato
++            // nativo da janela não o listam — é o caso do Turnip/Mesa no
++            // Android, cujo WSI devolve apenas os formatos do ANativeWindow
++            // (janela RGBA => R8G8B8A8_UNORM/SRGB). O upstream retorna aqui e
++            // o RT64 entra em loop tentando recriar o swapchain (com
++            // pickedSurfaceFormat ainda UNDEFINED, o resize() cria com
++            // VK_FORMAT_UNDEFINED e falha). Fallback: aceita um formato de
++            // 32 bpp do mesmo layout de bytes (RGBA/BGRA, UNORM/SRGB) — o
++            // pipeline de present do RT64 é fixado em B8G8R8A8_UNORM no
++            // upstream e escreve os componentes na mesma ordem de bytes, sem
++            // troca de canais visível. Preferimos UNORM.
++            static const VkFormat kFallbackFormats[] = {
++                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
++                VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB
++            };
++            for (uint32_t f = 0; f < sizeof(kFallbackFormats) / sizeof(kFallbackFormats[0]); f++) {
++                for (uint32_t i = 0; i < surfaceFormatCount; i++) {
++                    if (surfaceFormats[i].format == kFallbackFormats[f]) {
++                        compatibleSurfaceFormats.emplace_back(surfaceFormats[i]);
++                        fprintf(stderr, "Requested surface format unavailable; falling back to VkFormat %d.\n", (int)kFallbackFormats[f]);
++                        break;
++                    }
++                }
++                if (!compatibleSurfaceFormats.empty()) break;
++            }
++            if (compatibleSurfaceFormats.empty()) {
++                fprintf(stderr, "No compatible surface formats were found (surface offers %u).", surfaceFormatCount);
++                for (uint32_t i = 0; i < surfaceFormatCount; i++) {
++                    fprintf(stderr, " surfaceFormats[%u] = VkFormat %d", i, (int)surfaceFormats[i].format);
++                }
++                fprintf(stderr, "\n");
++                return;
++            }
++#else
+             fprintf(stderr, "No compatible surface formats were found.\n");
+             return;
++#endif
+         }
+ 
+         // Pick the preferred color space, if not available, pick whatever first shows up on the list.
+@@ -2704,7 +2788,7 @@ namespace plume {
      }
  
      void VulkanQueryPool::queryResults() {
@@ -97,26 +143,30 @@ index f1dd503..aa8a432 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkGetQueryPoolResults failed with error code 0x%X.\n", res);
              return;
-@@ -4131,7 +4178,18 @@ namespace plume {
+@@ -4131,7 +4215,22 @@ namespace plume {
          capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
          capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
          capabilities.presentWait = presentWaitSupported;
 +#if defined(__ANDROID__)
-+        // Port DK64-Recomp Android: o driver proprietário Adreno antigo (ex.:
-+        // moto g34 5G, driver LA.UM.9.14) sofre SIGSEGV dentro da implementação
-+        // de vkGetRefreshCycleDurationGOOGLE no libvulkan do sistema (a extensão
-+        // VK_GOOGLE_display_timing é emulada pelo framework Android). Com o
-+        // driver do sistema, o RT64 usa o pacing pelo refresh rate do SDL;
-+        // com Turnip (adrenotools) a extensão é implementada pelo driver.
-+        capabilities.displayTiming = (dk64_adrenotools_custom_driver_active() != 0) &&
-+            (supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end());
++        // Port DK64-Recomp Android: NUNCA habilitar VK_GOOGLE_display_timing
++        // neste port. No Android a extensão é EMULADA pelo loader do framework
++        // (libvulkan.so), que a lista como suportada para QUALQUER driver
++        // (proprietário, Turnip, qualquer ICD) — o achado da extensão não diz
++        // nada sobre o driver. E a implementação do loader neste aparelho
++        // (moto g34 5G, base LA.UM.9.14) sofre SIGSEGV (null deref) em
++        // vulkan::driver::GetRefreshCycleDurationGOOGLE — comprovado nos
++        // logcats com o driver proprietário E com o Turnip ativo: mesmo
++        // offset 0x2b2e4 no mesmo binário (/system/lib64/libvulkan.so e sua
++        // cópia memfd do adrenotools), sempre na thread "RT64 Present". O RT64
++        // usa o pacing alternativo (refresh rate reportado pelo SDL).
++        capabilities.displayTiming = false;
 +#else
          capabilities.displayTiming = supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end();
 +#endif
          capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
          capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
          capabilities.dynamicDepthBias = true;
-@@ -4464,11 +4522,30 @@ namespace plume {
+@@ -4464,11 +4563,30 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
