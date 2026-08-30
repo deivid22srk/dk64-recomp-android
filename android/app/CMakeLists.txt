@@ -59,6 +59,18 @@ set(PLUME_SDL_VULKAN_ENABLED TRUE)
 # build_*_shader do rt64 e precisa enxergar ${DXC} — sem isso o comando do DXC
 # fica vazio e o .hlsl vira o executável do custom command.
 set(DXC "LD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/x64" "${RT64_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
+# Opções do DXC no escopo TOP (espelha o CMake raiz desktop, de onde o recompui
+# as herda ao chamar build_*_shader do rt64). rt64 define as SUAS próprias no
+# escopo dele para os shaders do rt64.
+set(DXC_COMMON_OPTS "-I${REPO_ROOT}/src")
+set(DXC_DXIL_OPTS "-Wno-ignored-attributes")
+set(DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
+set(DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_0" "-D DYNAMIC_RENDER_PARAMS")
+set(DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_0" "-D DYNAMIC_RENDER_PARAMS" "-fvk-invert-y")
+set(DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_0")
+set(DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_0")
+set(DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
+set(DXC_LB_OPTS "${DXC_COMMON_OPTS}" "-D" "LIBRARY" "-T" "lib_6_3")
 add_compile_definitions(
     HLSL_CPU
     FFX_GCC
