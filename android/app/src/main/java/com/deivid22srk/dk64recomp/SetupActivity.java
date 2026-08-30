@@ -708,8 +708,8 @@ public class SetupActivity extends Activity {
     }
 
     /** Soname principal de um diretório de driver, ordem de preferência:
-     *  nomes conhecidos (Winlator/Turnip) → libvulkan*/vulkan.* → qualquer
-     *  .so que não seja o compilador LLVM do Mesa. */
+     *  nomes conhecidos (Winlator/Turnip), depois "libvulkan*" ou "vulkan.*",
+     *  depois qualquer .so que não seja o compilador LLVM do Mesa. */
     private static String findPreferredDriverSo(File dir) {
         File[] files = dir == null ? null : dir.listFiles();
         if (files == null) return null;
