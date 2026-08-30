@@ -344,6 +344,7 @@ set(MAIN_SOURCES
     "${REPO_ROOT}/src/main/register_overlays.cpp"
     "${REPO_ROOT}/src/main/register_patches.cpp"
     "${REPO_ROOT}/src/main/theme.cpp"
+    "${REPO_ROOT}/src/main/touch_input.cpp"
 
     "${REPO_ROOT}/src/game/config.cpp"
     "${REPO_ROOT}/src/game/debug.cpp"
