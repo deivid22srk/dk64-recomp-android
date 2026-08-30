@@ -54,6 +54,11 @@ set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
 # Shadow de variável normal: vence o FORCE do cmake_dependent_option do plume no Android
 set(PLUME_SDL_VULKAN_ENABLED TRUE)
+# DXC no escopo TOP (como faz o CMake raiz desktop): rt64 define DXC apenas no
+# PRÓPRIO escopo (subárvore dele); o RecompFrontend (irmão) compila shaders via
+# build_*_shader do rt64 e precisa enxergar ${DXC} — sem isso o comando do DXC
+# fica vazio e o .hlsl vira o executável do custom command.
+set(DXC "LD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/x64" "${RT64_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
 add_compile_definitions(
     HLSL_CPU
     FFX_GCC
