@@ -216,6 +216,17 @@ target_include_directories(PatchesLib PRIVATE
     "${NMR_DIR}/librecomp/include"
     "${NMR_DIR}/N64Recomp/include"
 )
+# patches_bin.c: embutimento do patches.bin (mesmo fluxo do CMake raiz desktop,
+# que usa file_to_c do host). patches.bin é gerado pelo N64Recomp patches.toml
+# no passo de codegen do CI.
+if(NOT EXISTS "${REPO_ROOT}/patches/patches.bin")
+    message(FATAL_ERROR "patches/patches.bin ausente — rode 'N64Recomp patches.toml' (codegen) antes do build Android")
+endif()
+add_custom_command(OUTPUT "${REPO_ROOT}/RecompiledPatches/patches_bin.c" "${REPO_ROOT}/RecompiledPatches/patches_bin.h"
+    COMMAND file_to_c "${REPO_ROOT}/patches/patches.bin" bk_patches_bin
+            "${REPO_ROOT}/RecompiledPatches/patches_bin.c" "${REPO_ROOT}/RecompiledPatches/patches_bin.h"
+    DEPENDS "${REPO_ROOT}/patches/patches.bin"
+    COMMENT "Gerando patches_bin.c via file_to_c do host")
 target_sources(PatchesLib PRIVATE
     "${REPO_ROOT}/RecompiledPatches/patches.c"
     "${REPO_ROOT}/RecompiledPatches/patches_bin.c"
