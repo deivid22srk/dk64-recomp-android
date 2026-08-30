@@ -1,5 +1,7 @@
 # DK64: Recompiled — Port Android
 
+[![build](https://github.com/deivid22srk/dk64-recomp-android/actions/workflows/build.yml/badge.svg)](https://github.com/deivid22srk/dk64-recomp-android/actions/workflows/build.yml)
+
 Port do [Donkey Kong 64: Recompiled](https://github.com/Rainchus/Donkey-Kong-64-Recompiled)
 (Rainchus) para **Android nativo** via NDK, mantendo toda a stack original:
 [N64ModernRuntime](https://github.com/Killklli/N64ModernRuntime) +
