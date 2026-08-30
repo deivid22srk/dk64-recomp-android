@@ -250,7 +250,7 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     bool choose_kazooie_icon = (rand() % 2 == 0);
     HICON new_icon = LoadIcon(GetModuleHandle(NULL), choose_kazooie_icon ? MAKEINTRESOURCE(APP_ICON_K) : MAKEINTRESOURCE(APP_ICON_B));
     SendMessage(wmInfo.info.win.window, WM_SETICON, ICON_SMALL2, (LPARAM)(new_icon));
-#elif defined(__linux__)
+#elif defined(__gnu_linux__)
     SetImageAsIcon("icons/app.png", window);
 #endif
 
