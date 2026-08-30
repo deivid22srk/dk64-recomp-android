@@ -14,10 +14,13 @@
 
 #include <android/log.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 
 namespace androidport {
@@ -44,7 +47,65 @@ bool ends_with_ci(const std::string& s, const char* suffix) {
 const std::string& internal_files_dir() { return g_internal; }
 const std::string& external_files_dir() { return g_external; }
 
+/*
+ * Pipa o stderr do processo para o logcat. O plume/RT64 reportam falhas de
+ * vídeo via fprintf(stderr) ("Unable to find devices that support Vulkan.",
+ * "Missing required extension: ...") — em builds release isso vai para
+ * /dev/null e o usuário só vê a caixa genérica "Unable to find compatible
+ * graphics device", sem chance de diagnóstico. Com o redirect, tudo aparece
+ * no logcat na tag "DK64Recomp-stderr".
+ */
+void redirect_stderr_to_logcat() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    int fds[2];
+    if (pipe(fds) != 0) return;
+
+    static int readerFd = fds[0];
+
+    auto reader = +[](void*) -> void* {
+        FILE* in = fdopen(readerFd, "r");
+        if (in == nullptr) return nullptr;
+        char* line = nullptr;
+        size_t cap = 0;
+        ssize_t n;
+        while ((n = getline(&line, &cap, in)) > 0) {
+            if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+            __android_log_print(ANDROID_LOG_WARN, "DK64Recomp-stderr", "%s", line);
+        }
+        free(line);
+        fclose(in);
+        return nullptr;
+    };
+
+    // A thread leitora é criada ANTES do dup2: se falhar, o stderr original
+    // permanece intacto (não há risco de um pipe sem leitor encher e travar
+    // quem escreve, pois o dup2 só acontece com o leitor já ativo).
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, reader, nullptr) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return;
+    }
+    pthread_detach(tid);
+
+    // O fd de escrita vira o novo stderr (fd 2) do processo inteiro.
+    if (dup2(fds[1], STDERR_FILENO) < 0) {
+        // A thread leitora fica bloqueada num pipe vazio — inofensivo.
+        close(fds[1]);
+        return;
+    }
+    if (fds[1] != STDERR_FILENO) close(fds[1]);
+
+    ALOGI("stderr -> logcat (tag DK64Recomp-stderr)");
+}
+
 void init_from_args(int argc, char** argv) {
+    // Primeiro de tudo: garantir que fprintf(stderr) do plume/RT64 apareça no logcat.
+    redirect_stderr_to_logcat();
+
     if (argc > 1 && argv[1] && argv[1][0]) g_internal = argv[1];
     if (argc > 2 && argv[2] && argv[2][0]) g_external = argv[2];
     if (g_internal.empty()) g_internal = ".";

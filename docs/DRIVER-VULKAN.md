@@ -66,6 +66,46 @@ Requisitos atendidos pelo port:
 | Driver em armazenamento **interno** do app (dlopen bloqueia sdcard) | Extração sempre em `filesDir/driver/installed/<id>/`; o nativo revalida o prefixo |
 | `libadrenotools` só faz sentido em Adreno/arm64 | `abiFilters = arm64-v8a` (o CMake do adrenotools aborta em outra ABI) |
 
+## 2.1 Bug real encontrado em campo: "Unable to find compatible graphics device"
+
+No 1º release com o seletor (moto g34 5G, Android 15), instalar o Turnip e
+iniciar o jogo produzia a caixa **"Unable to find compatible graphics
+device"** — o `hook` reportava `custom driver ativo`, mas o RT64 não
+encontrava NENHUM dispositivo Vulkan.
+
+Causa raiz (diagnosticada pelo logcat): o `nativeLibraryDir` era derivado de
+`/proc/self/maps` recortando a linha no último `/` antes de `libmain.so`, o
+que **manteve as colunas de endereço da linha no caminho**:
+
+```text
+"744e00e000-744f0d4000 r-xp 00000000 fe:00 3397824  /data/app/.../lib/arm64"
+└────────── colunas de /proc/self/maps ──────────┘└─────── dir real ───────┘
+```
+
+O adrenotools usa esse valor como caminho de busca (`ld_library_path` /
+`default_library_path`) do namespace do linker, que faz split por `:` — e o
+campo device (`fe:00`) contém **dois pontos**: as duas metades viram caminhos
+não absolutos e são descartadas (`normalize_path - invalid input ... ignoring`
+no logcat). Consequência: o *preload* de `libhook_impl.so` dentro do namespace
+do driver falha **silenciosamente** (`hook_impl.cpp` retorna `nullptr` sem
+log), nenhum ICD é carregado e `vkEnumeratePhysicalDevices` devolve 0
+dispositivos.
+
+Correções aplicadas:
+
+1. **Parsing correto** (`find_native_library_dir`): o pathname começa no
+   primeiro `/` da linha; só são aceitos mapeamentos de arquivo que terminam
+   exatamente em `/libmain.so` (excluindo os embutidos `base.apk!/...`), e o
+   diretório resultante é validado com `stat` exigindo os hooks
+   (`libmain_hook.so`, `libhook_impl.so`) antes de qualquer load.
+2. **Probe de pré-voo** (seção 3.6): valida empiricamente o driver antes do
+   jogo — se ele não expor GPU, é descartado automaticamente (fallback para o
+   driver do sistema) e o Setup recusa a instalação com mensagem clara.
+3. **stderr → logcat** (seção 3.7): mensagens `fprintf(stderr)` do plume/RT64
+   (ex.: `Unable to find devices that support Vulkan.`, `Missing required
+   extension: ...`) agora aparecem no logcat — antes sumiam em `/dev/null` em
+   builds release, o que tornou este diagnóstico impossível no 1º round.
+
 ## 3. Arquitetura da integração
 
 ```text
@@ -105,19 +145,24 @@ SetupActivity (Kotlin)                    custom_driver.cpp (nativo)            
 
 ### 3.2 Nativo — `android/native/compat/custom_driver.cpp`
 
-- Ponte em C puro (`extern "C"`, zero dependência de headers Vulkan):
-  - `dk64_adrenotools_get_instance_proc_addr()` — carrega o driver
-    (lazy, `std::once`) e devolve o `vkGetInstanceProcAddr` dele via
+- Ponte em C (`extern "C"`):
+  - `dk64_adrenotools_get_instance_proc_addr()` — resolve a seleção atual e
+    devolve o `vkGetInstanceProcAddr` do driver via
     `dlsym(handle, "vkGetInstanceProcAddr")`;
   - `dk64_adrenotools_custom_driver_active()` — 1 se o driver custom está em
-    uso nesta execução.
-- `hookLibDir` (`nativeLibraryDir`) é derivado de `/proc/self/maps`
-  (diretório que contém `libmain.so`) — sem alterar o contrato de argv do
-  SDL. `tmpLibDir` (`driver/tmp`) e `fileRedirectDir` (`driver/cache`,
-  redirect de cache de shaders do Turnip) são criados sob o filesDir.
+    uso nesta execução (usado pelo guard do display timing no plume).
+- **Resolução por fingerprint**: a seleção (`selected.txt`) é relida em cada
+  consulta e comparada à impressão digital já resolvida (`dir + library`);
+  mudou, recarrega do zero (incluindo probe). Assim trocar de driver no Setup
+  na mesma sessão do processo funciona — sem isso o resultado antigo ficaria
+  em cache (`call_once` do 1º design).
+- `hookLibDir` (`nativeLibraryDir`) é derivado de `/proc/self/maps` com o
+  parsing corrigido (seção 2.1) e validado por `stat` dos hooks.
+  `tmpLibDir` (`driver/tmp`) e `fileRedirectDir` (`driver/cache`, cache de
+  shaders do Turnip) são criados sob o filesDir.
 - Qualquer falha (sem seleção, diretório inválido, `adrenotools_open_libvulkan`
-  nulo, `dlsym` vazio) → `NULL` e o jogo segue com o **driver do sistema**,
-  exatamente como antes. Logs em `adb logcat -s DK64Recomp`.
+  nulo, `dlsym` vazio, probe sem GPU) → `NULL` e o jogo segue com o **driver
+  do sistema**. Logs em `adb logcat -s DK64Recomp`.
 
 ### 3.3 Renderer — patch `android/patches/plume-android.patch`
 
@@ -161,24 +206,76 @@ O plume (camada Vulkan do RT64) usa **volk** com `VOLK_IMPLEMENTATION`
   `libmain_hook.so`/`libhook_impl.so`/`libfile_redirect_hook.so` não estiverem
   empacotados (protege o requisito de `nativeLibraryDir` do adrenotools).
 
+### 3.6 Validação do driver (probe Vulkan)
+
+Instalar um build Turnip que **não suporta a GPU do aparelho** (ex.: builds
+`a7xx`/`a8xx` num Adreno 619/a6xx — os zips são por geração!) fazia o jogo
+falhar lá na frente com "Unable to find compatible graphics device". Hoje o
+driver é **testado antes de entrar em vigor**:
+
+1. `run_probe_locked()` (custom_driver.cpp) cria uma `VkInstance` com o
+   `vkGetInstanceProcAddr` do driver carregado (PFNs diretos, sem tocar na
+   tabela global do volk) e chama `vkEnumeratePhysicalDevices` — exatamente o
+   caminho que o RT64 executará.
+2. **0 dispositivos** (ou `vkCreateInstance` falho) → o driver é **descartado**
+   no load do jogo (fallback para o driver do sistema, com o display timing
+   desligado) e o SetupActivity **recusa a instalação** com rollback da
+   seleção.
+3. Probe OK → o nome da GPU e a versão da API aparecem na UI ("Driver
+   verificado: Adreno (TM) 619 (Vulkan 1.3.x)") e no logcat.
+
+A JNI `SetupActivity.nativeProbeCustomDriver()` (mesmo libmain.so do jogo,
+carregado no `static {}` do Setup) devolve o resultado em JSON:
+`{"active":bool,"ok":bool,"devices":int,"device":str,"api":str,"error":str}`.
+O probe roda uma vez por seleção (fingerprint), então instalar outro driver
+na mesma sessão reavalia tudo.
+
+### 3.7 Diagnóstico: stderr → logcat
+
+O plume/RT64 reportam falhas de vídeo via `fprintf(stderr)` — invisível no
+logcat de builds release. `androidport::redirect_stderr_to_logcat()`
+(android_paths.cpp, chamada no início do `SDL_main`) cria um `pipe`, aponta o
+`stderr` do processo para ele (`dup2`) e uma thread leitora repassa cada linha
+para o logcat na tag **`DK64Recomp-stderr`** (nível WARN). Com isso, falhas
+como `Unable to find devices that support Vulkan.` / `Missing required
+extension: X` ficam visíveis em `adb logcat -s DK64Recomp-stderr`.
+
 ## 4. Como usar (resumo para o usuário)
 
 1. Baixe um driver Turnip no formato adrenotools — ex.: releases
    [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers)
    (`Turnip_vX.Y.Z_R*.zip`; existem variantes `Gmem`/`Sysmem`).
-2. Abra o app → **Instalar driver (.zip)…** → selecione o zip.
+   **Escolha a pasta da geração da sua GPU**: Adreno 6xx (ex.: Adreno 619 do
+   moto g34 5G) → builds **a6xx**; Adreno 7xx → **a7xx**. Builds de outra
+   geração são recusados automaticamente pelo app.
+2. Abra o app → **Instalar driver (.zip)…** → selecione o zip. O app instala,
+   carrega e **testa** o driver: se listar a GPU (ex.: "Driver verificado:
+   Adreno (TM) 619"), está pronto; se não listar nenhuma GPU Vulkan, a
+   instalação é recusada com instruções.
 3. Toque em **INICIAR JOGO**. O driver entra em vigor neste início (o nativo
    lê a seleção quando o `SDL_main` sobe).
 4. Para voltar ao driver proprietário: **Remover driver**.
 
-Logs úteis: `adb logcat -s DK64Recomp` mostra
-`custom driver: 'Mesa Turnip driver v26.0.0 - R8' ativo (via adrenotools)` em
-caso de sucesso, ou o motivo da queda para o driver do sistema.
+Logs úteis:
+
+```bash
+adb logcat -s DK64Recomp DK64Recomp-stderr hook_impl
+```
+
+Sucesso: `custom driver: '...' ativo (via adrenotools)` seguido de
+`custom driver: probe OK — N dispositivo(s) Vulkan, GPU '...'`. Recusa:
+`custom driver: '...' DESCARTADO — probe não expôs GPU Vulkan (...)`.
+Falhas do RT64/plume aparecem na tag `DK64Recomp-stderr`.
 
 ## 5. Limitações conhecidas
 
-- Somente **Adreno** (a6xx/a7xx) em **arm64-v8a** — Turnip não existe para
-  Mali/PowerVR; em outros GPUs o driver do sistema é usado normalmente.
+- Somente **Adreno** em **arm64-v8a** — Turnip não existe para Mali/PowerVR;
+  em outros GPUs o driver do sistema é usado normalmente.
+- **Os zips de Turnip são por geração de GPU** (`vulkan.ad06xx.so` = a6xx,
+  `vulkan.ad07xx.so` = a7xx, `vulkan.ad08xx.so` = a8xx; builds antigos usavam
+  `libvulkan_freedreno.so`): instalar a geração errada não “quebra” o app
+  hoje — o probe recusa — mas também não acelera nada. Consulte a geração do
+  seu Adreno antes de baixar.
 - Android 10+ recomendado: abaixo da API 29 o adrenotools precisa do
   `tmpLibDir` gravável (suportado, mas memfd é o caminho preferencial).
 - A variante do Turnip importa: se um build apresentar artefatos gráficos,

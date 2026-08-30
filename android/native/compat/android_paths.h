@@ -22,6 +22,13 @@ void init_from_args(int argc, char** argv);
 // external_files_dir(). true + caminho em `out` se encontrado.
 bool find_rom_file(std::string& out);
 
+// Redireciona o stderr do processo para o logcat (tag "DK64Recomp-stderr",
+// nível WARN). Sem isso, fprintf(stderr) do plume/RT64 — ex.:
+// "Unable to find devices that support Vulkan." / "Missing required
+// extension: ..." — não aparece em nenhum lugar em builds release, o que
+// impossibilita diagnosticar falhas de vídeo a partir do logcat do usuário.
+void redirect_stderr_to_logcat();
+
 } // namespace androidport
 
 #endif // ANDROID_PATHS_H

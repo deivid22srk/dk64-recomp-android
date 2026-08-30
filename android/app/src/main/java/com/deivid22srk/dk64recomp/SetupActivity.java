@@ -63,6 +63,26 @@ public class SetupActivity extends Activity {
     private static final long MAX_DRIVER_ZIP_BYTES = 512L * 1024 * 1024;
     private static final int MAX_DRIVER_ENTRIES = 128;
 
+    static {
+        // Habilita o probe nativo do driver (JNI em custom_driver.cpp). O
+        // libmain.so é o MESMO que o jogo usa via SDLActivity: carregar aqui é
+        // inofensivo (nada roda no dlopen — o SDL_main só inicia via
+        // SDLActivity) e evita duplicar o probe numa lib separada.
+        try {
+            System.loadLibrary("main");
+        } catch (Throwable t) {
+            Log.e(TAG, "libmain.so indisponível no Setup (probe de driver desativado)", t);
+        }
+    }
+
+    /**
+     * Valida o driver selecionado (custom_driver.cpp): carrega o Turnip via
+     * adrenotools, cria uma VkInstance e enumera os dispositivos físicos — o
+     * MESMO caminho que o RT64 executará ao iniciar o jogo. Retorna JSON:
+     * {"active":bool,"ok":bool,"devices":int,"device":str,"api":str,"error":str}
+     */
+    private static native String nativeProbeCustomDriver();
+
     private TextView mStatus;
     private Button mPickButton;
     private TextView mDriverStatus;
@@ -164,7 +184,11 @@ public class SetupActivity extends Activity {
         driverHint.setText("Em alguns dispositivos o driver proprietário Adreno tem bugs "
                 + "(ex.: crash em vkGetRefreshCycleDurationGOOGLE). Um driver Turnip "
                 + "(Mesa) pode corrigir. Formato: .zip adrenotools (meta.json + vulkan.ad*.so), "
-                + "ex.: K11MCH1/AdrenoToolsDrivers no GitHub. Requer arm64 + Android 10+.");
+                + "ex.: K11MCH1/AdrenoToolsDrivers no GitHub. Requer arm64 + Android 10+.\n\n"
+                + "Importante: use um build para a geração da sua GPU — em Adreno 6xx "
+                + "(ex.: Adreno 619) use os builds 'a6xx'; builds a7xx/a8xx não expõem "
+                + "GPU neste aparelho. O driver é testado aqui mesmo após instalar; se "
+                + "não listar nenhuma GPU Vulkan, ele é recusado automaticamente.");
         driverHint.setTextSize(12f);
         driverHint.setTextColor(Color.rgb(0xD8, 0xD8, 0xD8));
         root.addView(driverHint, new LinearLayout.LayoutParams(
@@ -452,25 +476,85 @@ public class SetupActivity extends Activity {
         setDriverStatus("Instalando driver…");
         new Thread(() -> {
             String error = null;
+            String success = null;
+            DriverMeta meta = null;
             try {
-                DriverMeta meta = installDriver(uri, displayName);
+                meta = installDriver(uri, displayName);
                 Log.i(TAG, "Driver instalado: " + meta.name + " (" + meta.library + ") em " + meta.dir);
+
+                // Validação (probe): o driver recém-instalado é carregado pela
+                // mesma via do jogo (adrenotools) e testado com uma VkInstance.
+                // Sem isso, um build sem suporte à GPU (ex.: a8xx num Adreno 619)
+                // só falharia lá na frente com "Unable to find compatible
+                // graphics device".
+                String probeJson = null;
+                try {
+                    probeJson = nativeProbeCustomDriver();
+                } catch (Throwable t) {
+                    Log.w(TAG, "Probe nativo indisponível — driver aceito sem validação", t);
+                }
+                if (probeJson != null) {
+                    org.json.JSONObject j = new org.json.JSONObject(probeJson);
+                    final boolean active = j.optBoolean("active", false);
+                    final boolean ok = j.optBoolean("ok", false);
+                    final int devices = j.optInt("devices", 0);
+                    final String device = j.optString("device", "");
+                    final String api = j.optString("api", "");
+                    final String probeError = j.optString("error", "");
+                    Log.i(TAG, "Probe do driver: " + probeJson);
+
+                    if (active && !ok) {
+                        // Driver não expôs GPU — recusa e faz rollback da seleção.
+                        clearDriverSelection();
+                        error = "Driver \"" + meta.name + "\" recusado: ele não expõe nenhuma GPU "
+                                + "Vulkan neste aparelho" + (probeError.isEmpty() ? "" : " (" + probeError + ")")
+                                + ".\n\nIsso acontece quando o build não suporta a geração da GPU "
+                                + "deste dispositivo. Baixe um build Turnip compatível — para Adreno "
+                                + "6xx (ex.: Adreno 619) use os builds 'a6xx' do repositório "
+                                + "K11MCH1/AdrenoToolsDrivers no GitHub — e instale novamente.";
+                    } else if (active && ok) {
+                        success = "Driver \"" + meta.name + "\" verificado: "
+                                + (device.isEmpty() ? "GPU Vulkan" : device)
+                                + (api.isEmpty() ? "" : " (Vulkan " + api + ")")
+                                + ". Ele será usado ao iniciar o jogo.";
+                    } else if (!active) {
+                        // Falha no carregamento (adrenotools): rollback também.
+                        clearDriverSelection();
+                        error = "Driver \"" + meta.name + "\" não pôde ser carregado"
+                                + (probeError.isEmpty() ? "" : ": " + probeError)
+                                + ". O jogo usará o driver do sistema. Verifique se o zip é do "
+                                + "formato adrenotools (arm64) e tente outro build.";
+                    }
+                }
             } catch (Exception ex) {
                 Log.e(TAG, "Falha ao instalar driver", ex);
                 error = "Falha ao instalar driver: " + ex.getMessage();
             }
             final String finalError = error;
+            final String finalSuccess = success;
             runOnUiThread(() -> {
                 mDriverWorkRunning = false;
                 setDriverButtonsEnabled(true);
                 refreshDriverStatus();
                 if (finalError != null) {
                     toast(finalError);
+                } else if (finalSuccess != null) {
+                    toast(finalSuccess);
                 } else {
                     toast("Driver instalado! Ele será usado ao iniciar o jogo.");
                 }
             });
         }, "dk64-driver-install").start();
+    }
+
+    /** Remove apenas a seleção (selected.txt); usado no rollback do probe. */
+    private void clearDriverSelection() {
+        try {
+            new File(new File(getFilesDir(), DRIVER_BASE), DRIVER_SELECTED).delete();
+            Log.i(TAG, "Seleção de driver revertida (rollback do probe)");
+        } catch (Exception ex) {
+            Log.e(TAG, "Falha ao reverter seleção de driver", ex);
+        }
     }
 
     private void setDriverButtonsEnabled(boolean enabled) {

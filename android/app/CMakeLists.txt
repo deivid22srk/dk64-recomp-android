@@ -367,6 +367,9 @@ target_include_directories(main PRIVATE
     "${RT64_DIR}/src/contrib"
     "${RT64_DIR}/src/contrib/hlslpp/include"
     "${RT64_DIR}/src/contrib/dxc/inc"
+    # Headers Vulkan para o probe do driver custom (custom_driver.cpp):
+    # VkInstance + vkEnumeratePhysicalDevices para validar o Turnip instalado.
+    "${RT64_DIR}/src/contrib/plume/contrib/Vulkan-Headers/include"
     "${RT64_DIR}/src"
     "${RT64_DIR}/src/rhi"
     "${RT64_DIR}/src/render"

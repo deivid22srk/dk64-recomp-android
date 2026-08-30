@@ -11,6 +11,12 @@
  * (libmain_hook.so/libhook_impl.so/libfile_redirect_hook.so) e extrair os
  * .so do APK (useLegacyPackaging = true, já configurado no build.gradle.kts),
  * pois eles são dlopen'ados de dentro de nativeLibraryDir.
+ *
+ * Além do carregamento, este arquivo implementa o PROBE de validação: uma
+ * VkInstance é criada com o driver e os dispositivos físicos são enumerados.
+ * Se nenhum dispositivo aparecer (build sem suporte à GPU do aparelho), o
+ * driver é descartado e o jogo usa o driver do sistema — e o SetupActivity
+ * recusa o driver com mensagem clara via JNI (nativeProbeCustomDriver).
  */
 #include "custom_driver.h"
 
@@ -18,11 +24,18 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <jni.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <vector>
+
+#include <vulkan/vulkan.h>
 
 #include <adrenotools/driver.h>
 
@@ -39,14 +52,29 @@ struct DriverSelection {
     std::string name;    // nome amigável (campo "name" do meta.json)
 };
 
+// Resultado do probe (ver run_probe_locked).
+struct ProbeResult {
+    bool ok = false;
+    int deviceCount = 0;
+    std::string firstName;
+    std::string apiVersion;
+    std::string error;
+};
+
 struct CustomDriverState {
     bool attempted = false;
     bool active = false;
     void *proc_addr = nullptr;
+    // Impressão digital da seleção JÁ RESOLVIDA (dir + library). Se o
+    // selected.txt mudar (usuário instalou outro driver na mesma sessão),
+    // recarregamos do zero — sem isso, o call_once original devolveria o
+    // resultado em cache do driver antigo após a troca.
+    std::string fingerprint;
 };
 
 CustomDriverState g_state;
-std::once_flag g_once;
+std::mutex g_stateMutex;
+ProbeResult g_probe;
 
 bool read_key_value_file(const std::string &path, DriverSelection &out) {
     std::ifstream file(path);
@@ -75,42 +103,223 @@ bool is_safe_install_dir(const std::string &dir, const std::string &base) {
     return dir.size() > base.size();
 }
 
-// nativeLibraryDir na prática é o diretório que contém libmain.so (o APK usa
-// useLegacyPackaging=true, então os .so são extraídos para lá). Derivamos de
-// /proc/self/maps para não precisar de um novo parâmetro no argv do Java.
+/*
+ * nativeLibraryDir na prática é o diretório que contém libmain.so (o APK usa
+ * useLegacyPackaging=true, então os .so são extraídos para lá). Derivamos de
+ * /proc/self/maps para não precisar de um novo parâmetro no argv do Java.
+ *
+ * CORREÇÃO IMPORTANTE (bug do 1º release do driver Turnip): uma linha de
+ * /proc/self/maps tem a forma
+ *   "744e00e000-744f0d4000 r-xp 00000000 fe:00 3397824  /data/app/.../lib/arm64/libmain.so"
+ * A versão anterior recortava a partir do último '/' ANTES de "/libmain.so",
+ * mantendo TODAS as colunas de endereço no resultado:
+ *   "744e00e000-744f0d4000 r-xp 00000000 fe:00 3397824  /data/app/.../lib/arm64"
+ * O adrenotools usa esse valor como ld_library_path/default_library_path do
+ * namespace do linker, que faz split por ':' — e o device "fe:00" contém
+ * DOIS PONTOS: as duas metades viram caminhos não absolutos e são descartadas
+ * ("normalize_path - invalid input ... ignoring" no logcat). Com isso o
+ * preload de libhook_impl.so dentro do namespace do driver falha
+ * silenciosamente (hook_impl.cpp retorna nullptr sem log), NENHUM driver
+ * Vulkan é carregado e o RT64 falha com "Unable to find compatible graphics
+ * device" (0 dispositivos físicos).
+ */
 bool find_native_library_dir(std::string &out) {
     std::ifstream maps("/proc/self/maps");
     if (!maps) return false;
 
+    static const char kSuffix[] = "/libmain.so";
+
     std::string line;
     while (std::getline(maps, line)) {
-        const size_t pos = line.find("/libmain.so");
-        if (pos == std::string::npos) continue;
-        const size_t slash = line.rfind('/', pos);
-        if (slash == std::string::npos) continue;
-        out = line.substr(0, slash);
-        return !out.empty();
+        // A coluna do pathname começa no primeiro '/' da linha (depois de
+        // endereço/permissões/offset/device/inode).
+        const size_t pathStart = line.find('/');
+        if (pathStart == std::string::npos) continue;
+        const std::string path = line.substr(pathStart);
+
+        // Ignora mapeamentos embutidos no APK ("base.apk!/lib/..."): não são
+        // diretórios reais de filesystem e o dlopen neles falha.
+        if (path.find("!/") != std::string::npos) continue;
+
+        // Só aceita mapeamentos de arquivo que terminam exatamente em /libmain.so.
+        const size_t suffixLen = std::strlen(kSuffix);
+        if (path.length() <= suffixLen) continue;
+        if (path.compare(path.length() - suffixLen, suffixLen, kSuffix) != 0) continue;
+
+        std::string dir = path.substr(0, path.length() - suffixLen); // com '/' final
+        if (dir.empty() || dir.back() != '/') continue;
+        dir.pop_back(); // sem a barra final
+
+        // Sanidade: é NATIVELIBRARYDIR que o adrenotools precisa (hookLibDir) —
+        // exigimos os hooks empacotados ali antes de tentar qualquer load.
+        struct stat st;
+        if (stat((dir + "/libmain_hook.so").c_str(), &st) != 0 ||
+            stat((dir + "/libhook_impl.so").c_str(), &st) != 0) {
+            ALOGE("custom driver: hooks ausentes em '%s' (APK sem useLegacyPackaging?) — "
+                  "usando driver do sistema", dir.c_str());
+            continue;
+        }
+
+        out = dir;
+        return true;
     }
     return false;
 }
 
-void try_load_custom_driver() {
-    g_state.attempted = true;
+// ---------------------------------------------------------------------------
+// Probe (pré-voo) do driver: valida empiricamente o driver carregado criando
+// uma VkInstance e enumerando os dispositivos físicos. É o mesmo caminho que
+// o RT64/plume executará; se não listar nenhuma GPU, o jogo certamente
+// falharia com "Unable to find compatible graphics device".
+// ---------------------------------------------------------------------------
 
-    const std::string &files = androidport::internal_files_dir();
-    if (files.empty()) {
-        ALOGI("custom driver: sem files dir, usando driver do sistema");
+static std::string format_vk_version(uint32_t v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%u.%u.%u",
+                  (unsigned)VK_API_VERSION_MAJOR(v),
+                  (unsigned)VK_API_VERSION_MINOR(v),
+                  (unsigned)VK_API_VERSION_PATCH(v));
+    return buf;
+}
+
+static void run_probe_locked() {
+    g_probe = ProbeResult{};
+    g_probe.ok = false;
+    if (g_state.proc_addr == nullptr) {
+        g_probe.error = "driver não carregado";
         return;
     }
+
+    // Usamos PFNs diretos do vkGetInstanceProcAddr do driver (sem tocar na
+    // tabela global do volk — o plume inicializa a própria mais tarde).
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_state.proc_addr);
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    auto pfnEnumDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(nullptr, "vkEnumeratePhysicalDevices"));
+    auto pfnGetProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(nullptr, "vkGetPhysicalDeviceProperties"));
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(gipa(nullptr, "vkDestroyInstance"));
+    if (pfnCreateInstance == nullptr || pfnEnumDevices == nullptr ||
+        pfnGetProps == nullptr || pfnDestroyInstance == nullptr) {
+        g_probe.error = "entry points Vulkan ausentes no driver";
+        return;
+    }
+
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "dk64recomp-driver-probe";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_1;
+
+    VkInstanceCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &appInfo;
+
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult res = pfnCreateInstance(&ci, nullptr, &instance);
+    if (res != VK_SUCCESS || instance == VK_NULL_HANDLE) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "vkCreateInstance falhou (VkResult %d)", (int)res);
+        g_probe.error = buf;
+        return;
+    }
+
+    uint32_t count = 0;
+    res = pfnEnumDevices(instance, &count, nullptr);
+    if (res != VK_SUCCESS) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "vkEnumeratePhysicalDevices falhou (VkResult %d)", (int)res);
+        g_probe.error = buf;
+        pfnDestroyInstance(instance, nullptr);
+        return;
+    }
+
+    g_probe.deviceCount = (int)count;
+    if (count == 0) {
+        g_probe.error = "nenhuma GPU Vulkan exposta pelo driver "
+                        "(build sem suporte à geração da GPU deste aparelho?)";
+    } else {
+        std::vector<VkPhysicalDevice> devs(count);
+        if (pfnEnumDevices(instance, &count, devs.data()) == VK_SUCCESS) {
+            for (uint32_t i = 0; i < count; i++) {
+                VkPhysicalDeviceProperties p{};
+                pfnGetProps(devs[i], &p);
+                ALOGI("custom driver probe: device[%u] = '%s' (API Vulkan %s, vendor 0x%X, id 0x%X)",
+                      i, p.deviceName, format_vk_version(p.apiVersion).c_str(), p.vendorID, p.deviceID);
+                if (i == 0) {
+                    g_probe.firstName = p.deviceName;
+                    g_probe.apiVersion = format_vk_version(p.apiVersion);
+                }
+            }
+            g_probe.ok = true;
+        } else {
+            g_probe.error = "vkEnumeratePhysicalDevices falhou no 2º passo";
+        }
+    }
+
+    pfnDestroyInstance(instance, nullptr);
+}
+
+// O probe é executado no fim de ensure_loaded_locked(); g_probe fica sempre
+// consistente com a última seleção resolvida.
+
+static std::string json_escape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out += c;
+            }
+        }
+    }
+    return out;
+}
+
+/*
+ * Garante que g_state reflita o CONTEÚDO ATUAL de selected.txt, recarregando
+ * (com probe) quando a impressão digital da seleção mudar. PRECISA ser
+ * chamado com g_stateMutex retido. Todas as entradas públicas passam por aqui,
+ * então trocar o driver no Setup na mesma sessão do processo funciona.
+ */
+void ensure_loaded_locked() {
+    const std::string &files = androidport::internal_files_dir();
 
     DriverSelection sel;
-    if (!read_key_value_file(files + "/driver/selected.txt", sel)) {
-        ALOGI("custom driver: nenhum driver selecionado, usando driver do sistema");
-        return;
+    bool hasSelection = false;
+    std::string fingerprint;
+    if (!files.empty()) {
+        if (read_key_value_file(files + "/driver/selected.txt", sel)) {
+            if (is_safe_install_dir(sel.dir, files + "/driver/installed/")) {
+                hasSelection = true;
+                fingerprint = sel.dir + '\x1f' + sel.library;
+            } else {
+                ALOGE("custom driver: dir inválido (%s), ignorando seleção", sel.dir.c_str());
+            }
+        }
     }
 
-    if (!is_safe_install_dir(sel.dir, files + "/driver/installed/")) {
-        ALOGE("custom driver: dir inválido (%s), usando driver do sistema", sel.dir.c_str());
+    if (g_state.attempted && g_state.fingerprint == fingerprint) {
+        return; // seleção já resolvida (inclui o caso "nenhuma")
+    }
+
+    // (Re)carrega do zero para a nova seleção.
+    g_state = CustomDriverState{};
+    g_probe = ProbeResult{};
+    g_state.attempted = true;
+    g_state.fingerprint = fingerprint;
+
+    if (!hasSelection) {
+        ALOGI("custom driver: nenhum driver selecionado, usando driver do sistema");
+        run_probe_locked();
         return;
     }
 
@@ -143,31 +352,88 @@ void try_load_custom_driver() {
         nullptr);
 
     if (handle == nullptr) {
-        ALOGE("custom driver: adrenotools_open_libvulkan falhou, usando driver do sistema");
+        ALOGE("custom driver: adrenotools_open_libvulkan falhou, usando driver do sistema "
+              "(hookLibDir='%s')", hook_lib_dir.c_str());
+        run_probe_locked();
         return;
     }
 
     void *proc = dlsym(handle, "vkGetInstanceProcAddr");
     if (proc == nullptr) {
         ALOGE("custom driver: vkGetInstanceProcAddr não encontrado, usando driver do sistema");
+        run_probe_locked();
         return;
     }
 
     g_state.proc_addr = proc;
     g_state.active = true;
-    ALOGI("custom driver: '%s' ativo (via adrenotools)", sel.name.c_str());
+    ALOGI("custom driver: '%s' ativo (via adrenotools), hookLibDir=%s", sel.name.c_str(), hook_lib_dir.c_str());
+
+    // Pré-voo (probe): cria uma VkInstance com o driver carregado e enumera os
+    // dispositivos físicos — exatamente o que o RT64 fará em seguida. Se o
+    // driver não expuser NENHUMA GPU (build sem suporte à geração da GPU do
+    // aparelho, ex.: build a7xx/a8xx num Adreno 619), descartamos o driver
+    // aqui e o plume cai no driver do sistema com o display timing desligado,
+    // em vez de falhar com "Unable to find compatible graphics device".
+    run_probe_locked();
+    if (!g_probe.ok) {
+        ALOGE("custom driver: '%s' DESCARTADO — probe não expôs GPU Vulkan (%s). "
+              "Usando driver do sistema. Instale um build Turnip compatível com a "
+              "GPU do aparelho (para Adreno 6xx use builds 'a6xx', ex.: "
+              "K11MCH1/AdrenoToolsDrivers).", sel.name.c_str(), g_probe.error.c_str());
+        g_state.proc_addr = nullptr;
+        g_state.active = false;
+        return;
+    }
+
+    ALOGI("custom driver: probe OK — %d dispositivo(s) Vulkan, GPU '%s' (API Vulkan %s)",
+          g_probe.deviceCount, g_probe.firstName.c_str(), g_probe.apiVersion.c_str());
 }
 
 } // namespace
 
 void *dk64_adrenotools_get_instance_proc_addr(void) {
-    std::call_once(g_once, try_load_custom_driver);
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    ensure_loaded_locked();
     return g_state.proc_addr;
 }
 
 int dk64_adrenotools_custom_driver_active(void) {
-    std::call_once(g_once, try_load_custom_driver);
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    ensure_loaded_locked();
     return g_state.active ? 1 : 0;
+}
+
+/*
+ * JNI — chamado pelo SetupActivity logo após instalar/selecionar um driver
+ * (e disponível para diagnóstico). Carrega o driver (se necessário), roda o
+ * probe e devolve um JSON:
+ *
+ *   {"active":true,"ok":true,"devices":1,
+ *    "device":"Adreno (TM) 619","api":"1.3.280","error":""}
+ *   {"active":true,"ok":false,"devices":0,"device":"","api":"",
+ *    "error":"nenhuma GPU Vulkan exposta pelo driver (...)"}   <- driver sem suporte à GPU
+ *   {"active":false,...,"error":"driver não carregado"}        <- falha no carregamento
+ *
+ * O SetupActivity usa isso para RECUSAR drivers incompatíveis (ex.: build
+ * a7xx/a8xx num Adreno 619/a6xx) com uma mensagem clara, em vez de deixar o
+ * jogo falhar com "Unable to find compatible graphics device".
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_deivid22srk_dk64recomp_SetupActivity_nativeProbeCustomDriver(JNIEnv *env, jclass /*clazz*/) {
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    ensure_loaded_locked();
+
+    std::string json = "{";
+    json += "\"active\":" + std::string(g_state.active ? "true" : "false");
+    json += ",\"ok\":" + std::string(g_probe.ok ? "true" : "false");
+    json += ",\"devices\":" + std::to_string(g_probe.deviceCount);
+    json += ",\"device\":\"" + json_escape(g_probe.firstName) + "\"";
+    json += ",\"api\":\"" + json_escape(g_probe.apiVersion) + "\"";
+    json += ",\"error\":\"" + json_escape(g_probe.error) + "\"";
+    json += "}";
+
+    return env->NewStringUTF(json.c_str());
 }
 
 #else // !__ANDROID__
