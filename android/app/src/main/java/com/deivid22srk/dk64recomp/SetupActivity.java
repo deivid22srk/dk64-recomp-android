@@ -15,6 +15,7 @@ import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -101,11 +102,19 @@ public class SetupActivity extends Activity {
     // ------------------------------------------------------------------
 
     private void buildUi() {
+        // ScrollView: em paisagem (ex.: 1600x720) o conteúdo inteiro não cabe
+        // sem rolagem — sem ele os botões de driver e o INICIAR JOGO ficam
+        // cortados abaixo da tela (bug visto no moto g34 5G).
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
         root.setPadding(64, 64, 64, 64);
         root.setBackgroundColor(Color.rgb(0x2B, 0x1D, 0x0E)); // marrom barril
+        scroll.addView(root, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
         title.setText("DK64: Recompiled (Android)");
@@ -194,7 +203,7 @@ public class SetupActivity extends Activity {
         root.addView(mStartButton, startParams);
 
         refreshDriverStatus();
-        setContentView(root);
+        setContentView(scroll);
     }
 
     private void setStatus(String text) {
