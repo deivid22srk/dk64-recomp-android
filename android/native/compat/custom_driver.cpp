@@ -29,6 +29,15 @@
  * ~1 ms, rejeitando QUALQUER driver (rollback automático no Java). Correção:
  * o JNI agora recebe filesDir e nativeLibraryDir do Java (set_runtime_paths)
  * e funciona tanto no Setup quanto no jogo (mesmo processo).
+ *
+ * BUG CORRIGIDO (3º release): o probe pedia as PFNs de nível de instância
+ * (vkEnumeratePhysicalDevices etc.) com instância VK_NULL_HANDLE. O contrato
+ * da API Vulkan só permite nullptr para funções globais; o loader do sistema
+ * (que é o que o adrenotools devolve — um dlopen_unique de libvulkan.so com
+ * os hooks aplicados) recusa as demais e retorna nullptr, então o probe
+ * abortava ANTES da vkCreateInstance e descartava o driver recém-carregado.
+ * Correção: vkCreateInstance com nullptr; as demais PFNs obtidas com a
+ * instância recém-criada (ver run_probe_locked).
  */
 #include "custom_driver.h"
 
@@ -203,16 +212,24 @@ static void run_probe_locked() {
         return;
     }
 
-    // Usamos PFNs diretos do vkGetInstanceProcAddr do driver (sem tocar na
+    // Usamos PFNs diretas do vkGetInstanceProcAddr do driver (sem tocar na
     // tabela global do volk — o plume inicializa a própria mais tarde).
+    //
+    // CONTRATO DA API VULKAN (bug do 3º release — "entry points Vulkan
+    // ausentes no driver"): apenas funções GLOBAIS podem ser obtidas com
+    // instância VK_NULL_HANDLE (vkCreateInstance, vkEnumerateInstance*,
+    // vkGetInstanceProcAddr). Para funções de NÍVEL DE INSTÂNCIA
+    // (vkEnumeratePhysicalDevices, vkGetPhysicalDeviceProperties,
+    // vkDestroyInstance) o loader EXIGE uma VkInstance válida — o loader do
+    // sistema registra "invalid vkGetInstanceProcAddr(VK_NULL_HANDLE, ...)
+    // call" no logcat e devolve nullptr. A versão anterior pedia TODAS as
+    // PFNs com nullptr ANTES de criar a instância: ela própria abortava aí e
+    // o driver — mesmo carregado e funcional (adrenotools ativo) — era
+    // descartado sem que nenhuma vkCreateInstance chegasse a rodar.
     auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_state.proc_addr);
     auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
-    auto pfnEnumDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(nullptr, "vkEnumeratePhysicalDevices"));
-    auto pfnGetProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(nullptr, "vkGetPhysicalDeviceProperties"));
-    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(gipa(nullptr, "vkDestroyInstance"));
-    if (pfnCreateInstance == nullptr || pfnEnumDevices == nullptr ||
-        pfnGetProps == nullptr || pfnDestroyInstance == nullptr) {
-        g_probe.error = "entry points Vulkan ausentes no driver";
+    if (pfnCreateInstance == nullptr) {
+        g_probe.error = "vkCreateInstance ausente no driver";
         return;
     }
 
@@ -232,6 +249,17 @@ static void run_probe_locked() {
         char buf[96];
         std::snprintf(buf, sizeof(buf), "vkCreateInstance falhou (VkResult %d)", (int)res);
         g_probe.error = buf;
+        return;
+    }
+
+    // PFNs de nível de instância — obtidas AGORA, com a instância válida
+    // (exatamente o que o logcat do 3º release mostrou estar errado).
+    auto pfnEnumDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
+    auto pfnGetProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(instance, "vkGetPhysicalDeviceProperties"));
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
+    if (pfnEnumDevices == nullptr || pfnGetProps == nullptr || pfnDestroyInstance == nullptr) {
+        g_probe.error = "entry points Vulkan ausentes no driver";
+        if (pfnDestroyInstance != nullptr) pfnDestroyInstance(instance, nullptr);
         return;
     }
 

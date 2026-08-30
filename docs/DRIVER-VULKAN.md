@@ -141,6 +141,56 @@ Correção (paridade com o port redahm-android, validado no mesmo aparelho):
    o hook extra (`libfile_redirect_hook.so`) no namespace do driver era um
    modo de falha sem benefício.
 
+## 2.3 Bug real em campo (3º round): "entry points Vulkan ausentes no driver"
+
+Captura do usuário (logcat "Ao selecionar o driver") após o fix 2.2:
+
+```text
+custom driver: carregando 'WN-Turnip-1.06-p Axxx' (lib=libvulkan_freedreno.so) de
+  /data/user/0/.../files/driver/installed/wn-turnip-1.06-p_axxx.zip-mtfvxedt/ | flags=CUSTOM
+custom driver: 'WN-Turnip-1.06-p Axxx' ativo (via adrenotools)
+E vulkan  : invalid vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumeratePhysicalDevices") call
+E vulkan  : invalid vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties") call
+E vulkan  : invalid vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkDestroyInstance") call
+custom driver: 'WN-Turnip-1.06-p Axxx' DESCARTADO — entry points Vulkan ausentes no driver
+```
+
+Desta vez o carregamento (adrenotools) **funcionou** — o probe é que
+descartava o driver recém-carregado. Duas pistas fecham o diagnóstico:
+
+1. O `adrenotools_open_libvulkan` **não devolve o driver**; ele devolve um
+   `dlopen_unique` de **`/system/lib64/libvulkan.so`** (uma cópia exclusiva
+   do loader do sistema) com `libmain_hook.so` carregado em `RTLD_GLOBAL`
+   no mesmo namespace — o hook intercepta o `android_dlopen_ext` da
+   enumeração de ICDs e desvia `vulkan.*.so` para o driver custom. Logo, o
+   `vkGetInstanceProcAddr` obtido por `dlsym` é o **do loader do sistema**.
+2. No contrato da API Vulkan, só funções **globais** aceitam instância
+   `VK_NULL_HANDLE` (`vkCreateInstance`, `vkEnumerateInstance*`,
+   `vkGetInstanceProcAddr`). Para funções de **nível de instância**
+   (`vkEnumeratePhysicalDevices`, `vkGetPhysicalDeviceProperties`,
+   `vkDestroyInstance`) o loader **exige** uma `VkInstance` válida; com
+   `nullptr` ele registra exatamente os erros `invalid
+   vkGetInstanceProcAddr(VK_NULL_HANDLE, ...)` acima e devolve `nullptr`.
+
+O probe antigo pedia **todas** as PFNs com `nullptr` **antes** de criar a
+instância — ou seja, ele abortava na própria busca de entry points e a
+`vkCreateInstance` **nunca chegava a rodar** (por isso nenhum log do hook
+`hook_android_dlopen_ext: loading custom driver:` aparece na captura: o
+ICD Turnip nem chegou a ser carregado). Um driver 100% funcional seria
+descartado sempre.
+
+Correção em `run_probe_locked()` (`custom_driver.cpp`), na ordem correta do
+contrato Vulkan:
+
+1. `vkCreateInstance` obtida com `nullptr` (função global) e chamada;
+2. `vkEnumeratePhysicalDevices`, `vkGetPhysicalDeviceProperties` e
+   `vkDestroyInstance` obtidas **com a instância recém-criada**;
+3. destruição da instância garantida em todos os caminhos de erro.
+
+Efeito colateral positivo: como a `vkCreateInstance` do probe agora roda de
+fato, o ICD Turnip é carregado já na instalação — o teste do probe passou a
+exercitar exatamente o mesmo caminho que o jogo usará.
+
 ## 3. Arquitetura da integração
 
 ```text
