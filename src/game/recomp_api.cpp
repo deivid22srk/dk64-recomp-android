@@ -16,6 +16,7 @@
 #include "../patches/options.h"
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/config.hpp"
+#include "../main/touch_input.h"
 #include "../lib/N64ModernRuntime/thirdparty/xxHash/xxh3.h"
 
 extern "C" void recomp_update_inputs(uint8_t* rdram, recomp_context* ctx) {
@@ -485,4 +486,22 @@ extern "C" void osViGetCurrentMode_recomp(uint8_t* rdram, recomp_context* ctx) {
     }
 
     ctx->r2 = MEM_BU(0x3, modep);
+}
+// ===========================================================================
+// Port DK64-Recomp Android — camada de toque nativo (true touch)
+//
+// Chamado uma vez por frame pelo patch patches/patches_touch.c (engatado na
+// função de reinício de input do jogo). Lê diretamente da RAM do jogo as
+// variáveis globais do decomp que descrevem a tela ativa e publica-as na
+// camada de toque, que usa essa informação para interpretar toques nas
+// posições corretas de cada tela (logo, abertura, DK Rap, DK TV, menu de
+// barris, aventura...). Endereços de DK64Syms/data_dump.toml:
+//   game_mode_copy (u8)  @ 0x80755314 — modo atual (GameModes do decomp)
+//   current_map    (Maps)@ 0x8076A0A8 — mapa atual
+// ===========================================================================
+extern "C" void recomp_touch_frame_state(uint8_t* rdram, recomp_context* ctx) {
+    (void)ctx;
+    uint8_t game_mode_copy = *(uint8_t*)(rdram + (0x80755314ULL - 0xFFFFFFFF80000000ULL));
+    uint32_t current_map = *(uint32_t*)(rdram + (0x8076A0A8ULL - 0xFFFFFFFF80000000ULL));
+    touchlayer::notify_game_state(game_mode_copy, (uint8_t)current_map);
 }

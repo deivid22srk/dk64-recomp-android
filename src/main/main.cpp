@@ -55,6 +55,7 @@
 #include "recomp_data.h"
 #include "ovl_patches.hpp"
 #include "theme.h"
+#include "touch_input.h"
 #include "librecomp/game.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
@@ -152,10 +153,22 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#if defined(__ANDROID__)
+    // Port DK64-Recomp Android: canal único de toque. O SDL não sintetiza
+    // eventos de mouse a partir de toques; a camada touch nativa
+    // (src/main/touch_input.cpp) é quem entrega toques à UI (RmlUi) e ao
+    // jogo conforme a tela ativa. Definir ANTES do SDL_Init.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) > 0) {
         exit_error("Failed to initialize SDL2: %s\n", SDL_GetError());
     }
+
+#if defined(__ANDROID__)
+    // Instala o watch da camada de toque nativo (true touch).
+    touchlayer::init();
+#endif
 
     fprintf(stdout, "SDL Video Driver: %s\n", SDL_GetCurrentVideoDriver());
 
@@ -279,6 +292,8 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
 }
 
 void update_gfx(void*) {
+    // Port DK64-Recomp Android: ações de UI da camada touch (thread gráfica).
+    touchlayer::process_pending_ui_actions();
     recompinput::handle_events();
 }
 
@@ -833,6 +848,9 @@ int main(int argc, char** argv) {
     REGISTER_FUNC(recomp_get_ui_pillar);
     REGISTER_FUNC(recomp_get_gyro_deltas);
     REGISTER_FUNC(recomp_get_mouse_deltas);
+    // Port DK64-Recomp Android: publica o estado do jogo (game_mode_copy /
+    // current_map, lidos da RAM em patches/patches_touch.c) à camada touch.
+    REGISTER_FUNC(recomp_touch_frame_state);
     REGISTER_FUNC(recomp_get_inverted_axes);
     REGISTER_FUNC(recomp_get_analog_inverted_axes);
     REGISTER_FUNC(recomp_get_swimming_inverted_axes);
@@ -876,7 +894,10 @@ int main(int argc, char** argv) {
 
     ultramodern::input::callbacks_t input_callbacks{
         .poll_input = recompinput::poll_inputs,
-        .get_input = recompinput::profiles::get_n64_input,
+        // Port DK64-Recomp Android: wrapper da camada de toque nativo —
+        // repassa o input físico e aplica os pulsos derivados dos toques
+        // (START/A/B e passos do direcional nos anéis do menu).
+        .get_input = touchlayer::get_n64_input,
         .set_rumble = recompinput::set_rumble,
         .get_connected_device_info = get_connected_device_info,
     };
