@@ -29,8 +29,14 @@ list(APPEND CMAKE_MODULE_PATH "${ANDROID_PORT_DIR}/cmake/Modules")
 
 # ----------------------------------------------------------------------------
 # 0) Tool de host: file_to_c (obrigatória; roda no host durante o build)
+#    Aceita FILE_TO_C_EXE (nome canônico, lido também pelo patch do rt64) ou
+#    HOST_FILE_TO_C (alias passado pelo build.gradle.kts: -PHOST_FILE_TO_C=...).
 # ----------------------------------------------------------------------------
 set(FILE_TO_C_EXE "" CACHE FILEPATH "file_to_c pré-compilado para o host")
+set(HOST_FILE_TO_C "" CACHE FILEPATH "alias de FILE_TO_C_EXE (build.gradle.kts)")
+if(NOT FILE_TO_C_EXE AND HOST_FILE_TO_C)
+    set(FILE_TO_C_EXE "${HOST_FILE_TO_C}" CACHE FILEPATH "file_to_c pré-compilado para o host" FORCE)
+endif()
 if(NOT FILE_TO_C_EXE OR NOT EXISTS "${FILE_TO_C_EXE}")
     message(FATAL_ERROR
         "HOST_FILE_TO_C/FILE_TO_C_EXE não definido: compile lib/rt64/src/tools/file_to_c no host e passe -DHOST_FILE_TO_C=<bin>")
@@ -64,7 +70,8 @@ add_compile_definitions(
 include(FetchContent)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
-set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+# SDL_TEST é o nome real da opção do CMake do SDL 2.30.3 (não existe SDL_TEST_LIBRARY)
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_Declare(sdl2
@@ -74,18 +81,28 @@ FetchContent_Declare(sdl2
 FetchContent_MakeAvailable(sdl2)
 
 # Compat de includes: código do recomp/rt64 usa "SDL2/SDL.h"; o fonte do SDL2
-# expõe "SDL.h". Criamos <build>/sdl2inc/SDL2/* (cópias) + SDL_config.h gerado.
+# expõe "SDL.h". Copiamos os headers do fonte para <build>/sdl2inc/SDL2/*.
+# SDL_config.h e SDL_revision.h NÃO são copiados: usamos o config GERADO pelo
+# CMake do SDL (include-config-<config>/SDL2/SDL_config.h, escrito no generate
+# via file(GENERATE) — por isso entra como generator expression na lista de
+# includes abaixo, garantindo que consumidores e a própria lib vejam o MESMO
+# config). O fallback do tarball (SDL_config.h -> SDL_config_android.h) fica
+# como último recurso em ${sdl2_SOURCE_DIR}/include.
 set(SDL2_COMPAT_INCLUDE "${CMAKE_BINARY_DIR}/sdl2inc")
 file(MAKE_DIRECTORY "${SDL2_COMPAT_INCLUDE}/SDL2")
 file(GLOB _sdl2_headers "${sdl2_SOURCE_DIR}/include/*.h")
 foreach(_h ${_sdl2_headers})
+    get_filename_component(_sdl2_hdr_name "${_h}" NAME)
+    if(_sdl2_hdr_name MATCHES "^(SDL_config|SDL_revision)")
+        continue()
+    endif()
     file(COPY "${_h}" DESTINATION "${SDL2_COMPAT_INCLUDE}/SDL2")
 endforeach()
-if(EXISTS "${sdl2_BINARY_DIR}/include/SDL_config.h")
-    file(COPY "${sdl2_BINARY_DIR}/include/SDL_config.h" DESTINATION "${SDL2_COMPAT_INCLUDE}/SDL2")
-endif()
 
+# Ordem importa: o config gerado PRIMEIRO (SDL_config.h via genex de config),
+# depois as cópias planas (SDL2/SDL.h), depois SDL_revision.h gerado e o fonte.
 set(SDL2_ALL_INCLUDES
+    "${sdl2_BINARY_DIR}/include-config-$<LOWER_CASE:$<CONFIG>>/SDL2"
     "${SDL2_COMPAT_INCLUDE}"
     "${sdl2_BINARY_DIR}/include"
     "${sdl2_SOURCE_DIR}/include"
@@ -145,6 +162,12 @@ set(FT_DISABLE_PNG TRUE CACHE BOOL "" FORCE)
 set(FT_DISABLE_HARFBUZZ TRUE CACHE BOOL "" FORCE)
 set(FT_DISABLE_BROTLI TRUE CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(freetype)
+
+# RmlUi (Source/Core/CMakeLists.txt) linka `Freetype::Freetype` e o freetype
+# 2.13.2 NÃO cria esse alias in-tree (só no install/export). Chamamos o
+# find_package em modo módulo -> nosso FindFreetype.cmake cria o target
+# Freetype::Freetype apontando para o `freetype` do FetchContent.
+find_package(Freetype REQUIRED)
 
 # ----------------------------------------------------------------------------
 # 5) Dependências do recomp (mesma ordem do CMake raiz upstream)
@@ -270,6 +293,7 @@ target_link_libraries(main PRIVATE
     rt64
     nfd
     SDL2-static
+    vulkan
     android
     log
     ${CMAKE_DL_LIBS}

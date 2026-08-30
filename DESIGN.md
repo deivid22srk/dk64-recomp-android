@@ -17,6 +17,7 @@ android/                   projeto Gradle
   native/compat/           android_paths.cpp/.h — globais de paths injetados via argv
   patches/                 .patch aplicados via `git apply` nos submódulos (CI + local)
     rt64-android.patch
+    plume-android.patch
     recompfrontend-android.patch
   app/src/main/            AndroidManifest.xml, MainActivity.java, res/, java org.libsdl.app (vendored SDL2 2.30.3)
 .github/workflows/build.yml  build completo (codegen host + gradle APK debug)
@@ -24,16 +25,25 @@ android/                   projeto Gradle
 
 ## Estratégia CMake (android/app/CMakeLists.txt) — SEM editar submódulos
 - Root próprio (NÃO inclui o CMakeLists raiz do upstream, que exige vcpkg/SDL do sistema)
-- SDL2 2.30.3 via FetchContent (SDL_STATIC=ON, SDL_SHARED=OFF). Compat de includes:
-  `${CMAKE_BINARY_DIR}/sdl2inc/SDL2/*` (cópia dos headers) p/ `#include "SDL2/SDL.h"`
-  + `${sdl2_BINARY_DIR}/include` (SDL_config.h gerado) + `${sdl2_SOURCE_DIR}/include`
+- SDL2 2.30.3 via FetchContent (SDL_STATIC=ON, SDL_SHARED=OFF, SDL_TEST=OFF;
+  SDL_TEST_LIBRARY NÃO existe no CMake do SDL 2.30.3 — o nome real é SDL_TEST).
+  Compat de includes:
+  `${CMAKE_BINARY_DIR}/sdl2inc/SDL2/*` (cópia dos headers, EXCETO
+  SDL_config.h/SDL_revision.h) p/ `#include "SDL2/SDL.h"`
+  + `${sdl2_BINARY_DIR}/include-config-$<LOWER_CASE:$<CONFIG>>/SDL2`
+  (SDL_config.h gerado — escrito só no GENERATE via file(GENERATE), por isso
+  entra como genex; consumidores e a lib usam o MESMO config)
+  + `${sdl2_BINARY_DIR}/include` (SDL2/SDL_revision.h gerado)
+  + `${sdl2_SOURCE_DIR}/include` (fallback: SDL_config.h do tarball faz dispatch
+  p/ SDL_config_android.h — correto p/ Android, mas último da ordem)
 - **Fake config packages** (targets GLOBAL IMPORTED) para find_package dos submódulos:
   - SDL2: `SDL2_DIR` -> SDL2Config.cmake que define `SDL2::SDL2` (INTERFACE IMPORTED GLOBAL) + vars SDL2_INCLUDE_DIRS/SDL2_LIBRARIES
   - CURL: `CURL_DIR` -> CURLConfig.cmake definindo `CURL::libcurl` (GLOBAL) -> `curl_stub`
-  - freetype: `CMAKE_MODULE_PATH` += `android/cmake/Modules/FindFreetype.cmake` (usa target `freetype` do FetchContent)
+  - freetype: `CMAKE_MODULE_PATH` += `android/cmake/Modules/FindFreetype.cmake` (usa target `freetype` do FetchContent). O port chama `find_package(Freetype REQUIRED)` logo após o MakeAvailable — obrigatório: o RmlUi linka `Freetype::Freetype` e o freetype 2.13.2 não cria esse alias in-tree (só no install/export)
 - Stubs compilados aqui e linkados: `nfd` (estático, substitui add_subdirectory do rt64 via patch) e `curl_stub`
 - Patch nos submódulos (git apply no CI ANTES do build):
   - rt64: (1) file_to_c/tools `if(NOT ANDROID)`; (2) nfd `if(NOT ANDROID)`; (3) DXC p/ ANDROID usa CMAKE_HOST_SYSTEM_PROCESSOR; (4) `PLUME_SDL_VULKAN_ENABLED`/`RT64_SDL_WINDOW_VULKAN` também em ANDROID (rt64 CMake L77+L304); (5) rt64_application_window.cpp: branches `__ANDROID__` com static_assert -> implementação SDL
+  - plume: reordena o typedef de `RenderWindow` — `PLUME_SDL_VULKAN_ENABLED` (SDL_Window*) passa a vencer ANTES de `__ANDROID__` (ANativeWindow*), eliminando os 6 usos de ANativeWindow* nos caminhos ativos (rt64_application_window.cpp e os sites SDL_Vulkan_* de plume_vulkan.cpp compilam com SDL_Window*); com isso o `appCore.window = window_handle` de recompui/rt64_render_context.cpp (branch `__linux__ || __ANDROID__`) também compila sem cast
   - RecompFrontend: file.cpp (get_app_folder_path/get_program_path/get_asset_path/open_file_dialog) com branches `__ANDROID__` chamando android_paths.h; CMake do recompui: nada (find_packages resolvidos via fakes)
 - Definições globais antes dos add_subdirectory: HLSL_CPU, FFX_GCC, IMGUI_IMPL_VULKAN_NO_PROTOTYPES, PLUME_SDL_VULKAN_ENABLED, RT64_SDL_WINDOW_VULKAN, RT64_STATIC=TRUE, RECOMP_ANDROID
 - Depois dos add_subdirectory: injetar includes SDL2 em recompui/recompinput/rt64/main
@@ -54,6 +64,17 @@ android/                   projeto Gradle
   recompcontrollerdb.txt -> filesDir/recompcontrollerdb.txt
 - `recompui::file::open_file_dialog` (Android): escaneia extFilesDir/filesDir por *.z64/*.n64/*.v64 ->
   callback(path) — o runtime valida hash, faz byteswap e guarda em <config>/DK64.z64
+- RT64 userPaths (rt64_user_paths.cpp): branch `__linux__` ativo no Android usa
+  getenv("HOME") e cairia em getpwuid()->pw_dir (NULL p/ uid de app -> crash).
+  main.cpp faz `SDL_setenv("HOME", filesDir)` antes de qualquer init → RT64 grava
+  rt64-imgui.ini/rt64.log/games em filesDir/.config/rt64 (shader cache do RT64 é
+  só em RAM nesta versão; nada de cwd, que é "/")
+- Framerate alvo: jogo chama `recomp_get_target_framerate` (src/game/recomp_api.cpp)
+  -> `ultramodern::get_target_framerate(60/frame_divisor)` (ultramodern/src/events.cpp)
+  -> rr_option: Original (20 FPS), Manual (rr_manual_value) ou Display (Hz real
+  via `renderer_context->get_display_framerate()`; no Android = SDL_GetWindowDisplayIndex)
+- Threads: ultramodern usa pthread_setname_np (bionic API 26+, minSdk 26 OK) e
+  não usa sem_open — sem problema de API level
 - Manifest: landscape sensor, largeHeap, hardwareAccelerated=true (padrão do template SDL 2.30.3),
   VIBRATE p/ haptics do SDL, uses-feature opcionais, configChanges completos
 
@@ -73,10 +94,11 @@ android/                   projeto Gradle
 - nfd: NFD_Init, NFD_Quit, NFD_OpenDialogN, NFD_OpenDialogMultipleN, NFD_PickFolderN, NFD_SaveDialogN,
   NFD_FreePathN, NFD_PathSet_GetCount, NFD_PathSet_GetPathN, NFD_PathSet_Free (retornam NFD_ERROR/NFD_OKAY vazio)
 - curl: curl_global_init, curl_easy_init/setopt/perform/getinfo/cleanup/strerror, curl_slist_append/free_all
-  (grep final no ui_mod_discovery_http.cpp antes de fechar; `curl_global_initialize` era falso positivo — confirmar)
+  (verificado: o stub cobre todos os usos de ui_mod_discovery_http.cpp; `curl_global_initialize` é método próprio do ui_mod_discovery, não símbolo do libcurl)
 
 ## Riscos abertos (monitorar no CI)
-- plume Vulkan em Android: código __ANDROID__ existe; caminho principal usa PLUME_SDL_VULKAN_ENABLED (SDL surface)
 - sse2neon: main.cpp/recomp usam intrinsics x86? sse2neon no include path do N64ModernRuntime (arm64 Linux upstream compila — boa referência)
-- curl headers no recompui: stub curl/curl.h próprio (android/native/stubs/include/curl/curl.h) p/ compilar ui_mod_discovery_http
+- curl headers no recompui: stub curl/curl.h próprio (android/native/stubs/include/curl/curl.h) p/ compilar ui_mod_discovery_http — símbolos conferidos: o stub cobre todos os usos (curl_global_init/easy_*/slist_*; `curl_global_initialize` é método próprio do ui_mod_discovery, não símbolo do libcurl)
 - Warnings: -Wno-* nos alvos recomp (como upstream); "sem warnings relevantes" = sem erros e warnings novos do nosso código tratados
+- volk/Vulkan-Headers/VulkanMemoryAllocator/D3D12MemoryAllocator são SUBMÓDULOS aninhados de plume — CI precisa de `submodules: recursive` (já no build.yml)
+- rt64 CMake L102-103 seta ANDROID_PLATFORM=android-24/ANDROID_ABI=arm64-v8a incondicionalmente (override morto pós-toolchain NDK, inerte; minSdk real vem do Gradle: 26)

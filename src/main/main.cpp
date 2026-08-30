@@ -14,6 +14,7 @@
 #ifdef __ANDROID__
 // No Android o main() é o SDL_main invocado pelo SDLActivity (System.loadLibrary("main")),
 // então NÃO definimos SDL_MAIN_HANDLED e usamos os argv injetados pelo getArguments().
+#include <stdlib.h>
 #include "SDL_main.h"
 #include "android_paths.h"
 #else
@@ -691,6 +692,16 @@ int main(int argc, char** argv) {
 #ifdef __ANDROID__
     // Diretórios do app passados pelo MainActivity (SDLActivity::getArguments()).
     androidport::init_from_args(argc, argv);
+    // RT64::UserPaths::detectDataPath (src/common/rt64_user_paths.cpp do rt64)
+    // usa getenv("HOME") no branch __linux__ (também ativo no Android); sem HOME
+    // ele cai em getpwuid(getuid())->pw_dir, que retorna NULL para uid de app
+    // (desreferência -> crash na criação do RT64::Application). Apontar HOME p/
+    // o filesDir dá ao RT64 um dataPath gravável (filesDir/.config/rt64:
+    // rt64-imgui.ini, rt64.log, games/). O cwd do Android é "/", então nunca
+    // deixamos o RT64 resolver caminho por conta própria.
+    if (!androidport::internal_files_dir().empty()) {
+        SDL_setenv("HOME", androidport::internal_files_dir().c_str(), 1);
+    }
 #else
     (void)argc;
     (void)argv;
