@@ -34,7 +34,6 @@ android {
                 }
                 arguments += args
                 cppFlags += listOf("-std=c++20", "-fexceptions", "-frtti")
-                abiFilters += listOf("arm64-v8a")
             }
         }
     }

@@ -232,17 +232,34 @@ public class SetupActivity extends Activity {
 
     private void copyRom(Uri uri, String name) throws IOException, SecurityException {
         File dest = new File(romDir(), name);
-        try (InputStream in = getContentResolver().openInputStream(uri);
-             OutputStream out = new FileOutputStream(dest)) {
-            if (in == null) throw new IOException("Não foi possível abrir o arquivo selecionado.");
-            byte[] buf = new byte[1 << 16];
-            long total = 0;
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                total += n;
-                if (total > MAX_ROM_BYTES) throw new IOException("Arquivo maior que 64 MB.");
-                out.write(buf, 0, n);
+        // Cópia atômica: grava em .tmp e renomeia — evita ROM parcial no
+        // diretório escaneado se a cópia falhar no meio (JAVA-1).
+        File tmp = new File(romDir(), name + ".tmp");
+        try {
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(tmp)) {
+                if (in == null) throw new IOException("Não foi possível abrir o arquivo selecionado.");
+                byte[] buf = new byte[1 << 16];
+                long total = 0;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    total += n;
+                    if (total > MAX_ROM_BYTES) throw new IOException("Arquivo maior que 64 MB.");
+                    out.write(buf, 0, n);
+                }
             }
+            if (!tmp.renameTo(dest)) {
+                // fallback raro (rename entre filesystems): cópia direta
+                try (InputStream in = new java.io.FileInputStream(tmp);
+                     OutputStream out = new FileOutputStream(dest)) {
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                }
+                tmp.delete();
+            }
+        } finally {
+            tmp.delete(); // limpa resíduo em qualquer falha (rename bem-sucedido = no-op)
         }
     }
 

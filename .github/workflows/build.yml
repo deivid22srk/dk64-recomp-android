@@ -10,8 +10,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: false
+  group: build-\${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build-apk:
@@ -53,7 +56,13 @@ jobs:
             --pattern 'Donkey.Kong.64.zip' --output rom-input/Donkey.Kong.64.zip --clobber
           cd rom-input
           unzip -o Donkey.Kong.64.zip
-          SHA1=$(sha1sum *.z64 | cut -d' ' -f1)
+          ROMS=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | wc -l)
+          if [ "$ROMS" -ne 1 ]; then
+            echo "::error::Esperava exatamente 1 ROM no zip, achei $ROMS"
+            exit 1
+          fi
+          ROM_FILE=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | head -1)
+          SHA1=$(sha1sum "$ROM_FILE" | cut -d' ' -f1)
           echo "ROM sha1: $SHA1"
           if [ "$SHA1" != "cf806ff2603640a748fca5026ded28802f1f4a50" ]; then
             echo "::error::ROM incorreta (esperado NTSC-U 1.0, sha1 cf806ff2...)"

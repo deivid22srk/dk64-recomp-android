@@ -88,3 +88,9 @@ cd android && ./gradlew assembleDebug -PHOST_FILE_TO_C="$PWD/../build-filetoc/fi
   SDL2, dk64_decomp team — detalhes no README original ([README-UPSTREAM.md](README-UPSTREAM.md))
 
 *Este port é um trabalho técnico de fã, sem qualquer afiliação com a Nintendo.*
+
+### Trocar a ROM depois
+
+O app guarda uma cópia validada da ROM como `files/DK64.z64` (armazenamento
+interno). Se você trocar o arquivo na pasta externa, apague também a cópia
+interna para forçar a revalidação (o runtime valida por hash a cada início).
