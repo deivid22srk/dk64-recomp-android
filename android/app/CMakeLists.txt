@@ -356,6 +356,8 @@ set(MAIN_SOURCES
 
     "${ANDROID_PORT_DIR}/native/compat/android_paths.cpp"
     "${ANDROID_PORT_DIR}/native/compat/custom_driver.cpp"
+    # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
+    "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )
 target_sources(main PRIVATE ${MAIN_SOURCES} "${ICON_GEN_DIR}/icon_bytes.c")
 

@@ -4,6 +4,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
@@ -35,6 +36,9 @@ public class MainActivity extends SDLActivity {
 
     private static final String TAG = "DK64Recomp";
 
+    /** Overlay do gamepad virtual (estilo N64Pad2/Dolphin) sobre o SDLSurface. */
+    private VirtualPadView virtualPadView;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         Log.i(TAG, "MainActivity.onCreate -> iniciando fluxo SDL");
@@ -47,6 +51,25 @@ public class MainActivity extends SDLActivity {
             attrs.layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
             getWindow().setAttributes(attrs);
+        }
+
+        // Gamepad virtual: overlay transparente por cima do SDLSurface.
+        // - A libmain.so já foi carregada por super.onCreate (loadLibraries),
+        //   então os métodos JNI do VirtualPadView já estão vinculáveis.
+        // - Touches que não acertam nenhum controle caem no SDLSurface
+        //   (o overlay devolve false), mantendo o touch-as-mouse dos menus.
+        // - O HUD só é desenhado quando o jogo inicia (callback nativo
+        //   VirtualPadView.onGameStarted), para não bloquear a launcher.
+        if (mLayout != null && virtualPadView == null) {
+            try {
+                virtualPadView = new VirtualPadView(this);
+                mLayout.addView(virtualPadView, new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+            } catch (UnsatisfiedLinkError e) {
+                Log.e(TAG, "JNI do gamepad virtual indisponível: " + e.getMessage());
+                virtualPadView = null;
+            }
         }
     }
 

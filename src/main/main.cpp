@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include "SDL_main.h"
 #include "android_paths.h"
+#include "virtual_pad.h"
 #else
 #define SDL_MAIN_HANDLED
 #endif
@@ -880,6 +881,22 @@ int main(int argc, char** argv) {
         .set_rumble = recompinput::set_rumble,
         .get_connected_device_info = get_connected_device_info,
     };
+
+#ifdef __ANDROID__
+    // Gamepad virtual (overlay de toque Android): além do input dos controles
+    // físicos/teclado, mescla o estado do pad de toque no input N64 e avisa o
+    // overlay Java quando o jogo inicia (para exibir os controles na tela).
+    // Ver android/native/compat/virtual_pad.cpp.
+    input_callbacks.poll_input = []() {
+        recompinput::poll_inputs();
+        androidport::virtualpad::notify_game_started(ultramodern::is_game_started());
+    };
+    input_callbacks.get_input = [](int controller_num, uint16_t* buttons, float* x, float* y) {
+        bool ret = recompinput::profiles::get_n64_input(controller_num, buttons, x, y);
+        androidport::virtualpad::merge_input(controller_num, buttons, x, y);
+        return ret;
+    };
+#endif
 
     ultramodern::events::callbacks_t thread_callbacks{
         .vi_callback = recompinput::update_rumble,

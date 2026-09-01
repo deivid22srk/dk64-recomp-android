@@ -36,6 +36,35 @@ Cada push gera um APK automaticamente no GitHub Actions (workflow `build.yml`):
 - O mod store *online* está desativado no Android v1 (mods locais `.nrm`/`.rtz` funcionam:
   coloque-os em `Android/data/com.deivid22srk.dk64recomp/files/mods/`)
 
+## Gamepad virtual (touch)
+
+Para jogar **sem controle físico**, o port inclui um gamepad virtual desenhado
+sobre o jogo (`VirtualPadView`), no mesmo estilo visual do projeto
+[N64Pad2](https://github.com/deivid22srk/N64Pad2) (desenho 100% em `Canvas`,
+realce verde no toque, vibração leve, multi-touch real) com o HUD posicionado
+no estilo do **Dolphin**, em posições confortáveis para os polegares:
+
+| Região | Controles |
+|---|---|
+| Topo | `L` (esq) · `Z` (centro) · `R` (dir) |
+| Esquerda | Analógico único com setas de 8 direções e zona morta |
+| Base | D-pad em cruz · `START` vermelho · botão `☰` (abre o menu do port) |
+| Direita | Losango de 4 botões **C** amarelos · `A` grande · `B` (diagonal do A, como no N64) |
+| Quina inferior direita | Mostrar/esconder o HUD (fica ativo mesmo escondido) |
+
+Comportamento:
+
+- O HUD **só aparece quando o jogo inicia** — a launcher e os menus continuam
+  usando o touch como mouse. Toques em áreas livres do HUD também passam para
+  o jogo normalmente.
+- Botões A/B/C/START/L/R/Z/D-pad são repassados ao runtime como input N64
+  (mesma máscara de botões de um controle físico), então **todos os modos de
+  jogo, menus internos do DK64 e combinações funcionam igual**.
+- `A` aceita e `B` volta nas interfaces do port (launcher/menu de configuração);
+  o analógico e o D-pad navegam; `☰` equivale ao botão Select/Back
+  (abre e fecha o menu de configurações do port em jogo).
+- Controles semi-transparentes (estilo Dolphin) para não esconder a ação.
+
 ## Como compilar (resumo)
 
 O build tem duas fases (ambas automatizadas no CI):

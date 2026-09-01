@@ -1,5 +1,7 @@
 plugins {
     id("com.android.application")
+    // Kotlin para o overlay do gamepad virtual (VirtualPadView.kt).
+    id("org.jetbrains.kotlin.android")
 }
 
 // Caminho opcional para o binário file_to_c pré-compilado no host (necessário no CI).
