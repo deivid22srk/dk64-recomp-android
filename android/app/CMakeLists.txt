@@ -356,6 +356,8 @@ set(MAIN_SOURCES
 
     "${ANDROID_PORT_DIR}/native/compat/android_paths.cpp"
     "${ANDROID_PORT_DIR}/native/compat/custom_driver.cpp"
+    # Ponte SAF <-> menus do recomp (ROM/driver escolhidos na UI do próprio jogo)
+    "${ANDROID_PORT_DIR}/native/compat/file_bridge.cpp"
     # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
     "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )

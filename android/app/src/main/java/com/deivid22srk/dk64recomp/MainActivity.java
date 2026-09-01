@@ -1,5 +1,9 @@
 package com.deivid22srk.dk64recomp;
 
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -12,15 +16,18 @@ import org.libsdl.app.SDLActivity;
 import java.io.File;
 
 /**
- * Port Android do DK64: Recompiled — Activity do SDL.
+ * Port Android do DK64: Recompiled — Activity do SDL e ÚNICA activity do app.
  *
- * Esta Activity NÃO é a launcher: o {@link SetupActivity} garante ROM + assets
- * prontos antes de iniciá-la, então o onCreate NÃO é sobrescrito para "pular"
- * o super — o ciclo de vida do SDLActivity 2.30.8 (loadLibraries -> SDLThread
- * -> SDL_main) roda 100% padrão. Sobrescrever onCreate sem chamar
- * super.onCreate() derruba o app com SuperNotCalledException (o framework
- * exige chamada ao super.onCreate de android.app.Activity) e deixaria
- * mBrokenLibraries=true, bloqueando onResume/onWindowFocusChanged.
+ * A tela Java de setup (SetupActivity) foi DESATIVADA: o app abre direto no
+ * jogo e tudo que ela fazia migrou para cá e para a UI do próprio recomp:
+ *  - Assets do APK: copiados no onCreate (AppSetup.ensureAssets, marcador
+ *    .assets_version) ANTES do super.onCreate iniciar a SDLThread;
+ *  - ROM: opção "Load ROM" do menu launcher do jogo -> DocumentsUI (SAF)
+ *    via ponte JNI android/native/compat/file_bridge.cpp -> SafFiles copia
+ *    para o filesDir -> select_rom valida e armazena no config;
+ *  - Driver Turnip: opção "GPU Driver" do menu launcher -> mesmo caminho SAF
+ *    -> GpuDriverInstaller extrai + probe -> custom_driver.cpp carrega no
+ *    próximo início do app.
  *
  * Fluxo nativo: SDLMain.run -> nativeRunMain -> SDL_main (src/main/main.cpp),
  * que consome os diretórios via androidport::init_from_args(argc, argv).
@@ -39,9 +46,28 @@ public class MainActivity extends SDLActivity {
     /** Overlay do gamepad virtual (estilo N64Pad2/Dolphin) sobre o SDLSurface. */
     private VirtualPadView virtualPadView;
 
+    // ------------------------------------------------------------------
+    // Ponte SAF <-> menu do jogo (file_bridge.cpp). Requisições chegam da
+    // thread de render do RT64 (JNI -> requestFilePicker); resultados são
+    // processados em background e publicados em nativeOnFilePicked.
+    // ------------------------------------------------------------------
+
+    /** Kind::Rom do file_bridge.h — mantenha em sincronia. */
+    private static final int KIND_ROM = 0;
+    /** Kind::DriverZip do file_bridge.h — mantenha em sincronia. */
+    private static final int KIND_DRIVER = 1;
+
+    private static final int PICK_ROM_REQUEST = 0xD864;
+    private static final int PICK_DRIVER_REQUEST = 0xADF1;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        Log.i(TAG, "MainActivity.onCreate -> iniciando fluxo SDL");
+        Log.i(TAG, "MainActivity.onCreate -> preparando assets e iniciando fluxo SDL");
+        // ANTES do super: super.onCreate inicia a SDLThread, que logo consome
+        // filesDir/assets (fontes/texturas do recompui). A cópia é bloqueante
+        // e marcada por .assets_version — nas execuções seguintes é um stat.
+        AppSetup.ensureAssets(this);
+
         super.onCreate(savedInstanceState);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             WindowManager.LayoutParams attrs = getWindow().getAttributes();
@@ -51,6 +77,15 @@ public class MainActivity extends SDLActivity {
             attrs.layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
             getWindow().setAttributes(attrs);
+        }
+
+        // Registra a JavaVM na ponte de arquivos (libmain.so já carregada por
+        // super.onCreate -> loadLibraries). Sem isso, o menu do jogo não
+        // consegue abrir o DocumentsUI; falha é logada e degrada o recurso.
+        try {
+            nativeBridgeInit();
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "JNI da ponte de arquivos indisponível: " + e.getMessage());
         }
 
         // Gamepad virtual: overlay transparente por cima do SDLSurface.
@@ -72,6 +107,96 @@ public class MainActivity extends SDLActivity {
             }
         }
     }
+
+    /**
+     * Resultado do DocumentsUI (SAF). Pode ser cancelamento (res != OK).
+     * O processamento (cópia da ROM / extração do driver + probe Vulkan) roda
+     * em background para não ANRar a UI thread; ao terminar publica no nativo
+     * (nativeOnFilePicked), que entrega ao menu do jogo no próximo frame
+     * (draw_hook -> file_bridge::process_pending).
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        final int kind;
+        switch (requestCode) {
+            case PICK_ROM_REQUEST: kind = KIND_ROM; break;
+            case PICK_DRIVER_REQUEST: kind = KIND_DRIVER; break;
+            default: return; // (HID do SDLActivity já foi tratado pelo super)
+        }
+
+        final Uri uri = (resultCode == RESULT_OK && data != null && data.getData() != null)
+                ? data.getData() : null;
+        final Context appContext = getApplicationContext();
+        new Thread(() -> {
+            boolean ok = false;
+            String payload;
+            try {
+                if (uri == null) {
+                    payload = "No file selected."; // cancelamento: o menu só ignora
+                } else if (kind == KIND_ROM) {
+                    payload = SafFiles.copyRomToFilesDir(appContext, uri);
+                    ok = true;
+                } else {
+                    String name = SafFiles.queryDisplayName(appContext, uri);
+                    if (name == null) name = "driver.zip";
+                    name = name.substring(name.lastIndexOf('/') + 1).trim();
+                    String lower = name.toLowerCase();
+                    if (!lower.endsWith(".zip") && !lower.endsWith(".so")) {
+                        payload = "Please pick a driver .zip (adrenotools or Winlator/Turnip) "
+                                + "or a driver .so file.";
+                    } else {
+                        String friendly = GpuDriverInstaller.installFromUri(appContext, uri, name);
+                        payload = GpuDriverInstaller.probeStatusText(appContext, friendly);
+                        ok = true;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "Falha ao processar arquivo escolhido", t);
+                payload = "Failed to process the selected file: " + t.getMessage();
+            }
+
+            final boolean fOk = ok;
+            final String fPayload = payload;
+            try {
+                nativeOnFilePicked(kind, fOk, fPayload);
+            } catch (UnsatisfiedLinkError e) {
+                Log.e(TAG, "nativeOnFilePicked indisponível: " + e.getMessage());
+            }
+        }, "dk64-saf-result").start();
+    }
+
+    /**
+     * Chamado via JNI pela thread de render (file_bridge.cpp). Posta o Intent
+     * SAF na UI thread e devolve na hora — a troca de Activity (DocumentsUI)
+     * e o processamento do resultado ficam inteiramente do lado Java.
+     */
+    public static boolean requestFilePicker(int kind) {
+        final Activity activity = mSingleton;
+        if (activity == null || activity.isFinishing()) {
+            Log.e(TAG, "requestFilePicker: Activity indisponível");
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            try {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("*/*"); // ROMs/drivers chegam como octet-stream/zip
+                activity.startActivityForResult(intent,
+                        kind == KIND_ROM ? PICK_ROM_REQUEST : PICK_DRIVER_REQUEST);
+            } catch (Exception e) {
+                Log.e(TAG, "Falha ao abrir o seletor SAF", e);
+            }
+        });
+        return true;
+    }
+
+    /** Registro da JavaVM para a ponte de arquivos (implementado em file_bridge.cpp). */
+    private static native void nativeBridgeInit();
+
+    /** Publica o resultado do SAF para o menu do jogo (implementado em file_bridge.cpp). */
+    private static native void nativeOnFilePicked(int kind, boolean ok, String payload);
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
@@ -110,7 +235,9 @@ public class MainActivity extends SDLActivity {
      * ports SDL no Android (a Activity é destruída apenas em finish() do fim
      * do jogo, back na raiz da task, ou swipe em recents — a orientação é
      * fixa e configChanges cobre rotações/teclado, então isFinishing() aqui
-     * significa "fim de jogo", nunca recriação de configuração).
+     * significa "fim de jogo", nunca recriação de configuração). É também o
+     * que torna a troca de driver via menu "GPU Driver" efetiva: Exit ->
+     * reabrir = driver novo.
      */
     @Override
     public void onDestroy() {

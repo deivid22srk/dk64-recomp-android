@@ -19,19 +19,21 @@ Cada push gera um APK automaticamente no GitHub Actions (workflow `build.yml`):
 ## Instalação no aparelho
 
 1. Instale o `app-debug.apk` (habilite "Instalar apps desconhecidos").
-2. Coloque a ROM (`.z64`, `.n64` ou `.v64` — a conversão de byteswap é automática) em:
-   ```
-   /storage/emulated/0/Android/data/com.deivid22srk.dk64recomp/files/
-   ```
-   (via cabo USB ou gerenciador de arquivos) — **ou** use o botão **"Selecionar ROM…"**
-   na primeira abertura do app.
-3. Abra o app. Na primeira execução os assets da UI são extraídos para o armazenamento
-   interno e o jogo valida a ROM (a ROM é copiada para a pasta interna como `DK64.z64`).
+2. Abra o app — ele vai direto para o **menu do jogo** (a tela Java de setup foi
+   desativada). Na primeira execução os assets da UI são extraídos sozinhos.
+3. Se ainda não houver ROM, a primeira opção do menu é **“Load ROM”**: toque,
+   escolha o arquivo (`.z64`, `.n64` ou `.v64` — a conversão de byteswap é
+   automática) no seletor de arquivos do Android e aguarde a validação — a
+   opção vira **“Start Game”**.
+
+   > A ROM escolhida é copiada para o armazenamento interno do app e validada
+   > por hash (pick-once: nas próximas aberturas o menu já abre em “Start
+   > Game”).
 
 ### Requisitos
 
 - Android 8.0+ (arm64-v8a)
-- **GPU com Vulkan 1.1+** (o app avisa se o dispositivo não reportar)
+- **GPU com Vulkan 1.1+**
 - Gamepad Bluetooth/USB recomendado para jogar; touch navega os menus como mouse
 - O mod store *online* está desativado no Android v1 (mods locais `.nrm`/`.rtz` funcionam:
   coloque-os em `Android/data/com.deivid22srk.dk64recomp/files/mods/`)
@@ -126,7 +128,8 @@ crash `SIGSEGV` em `vkGetRefreshCycleDurationGOOGLE` na thread `RT64 Present`,
 visto no moto g34 5G). O port integra o **libadrenotools** (como Vita3K,
 yuzu/sudachi e os ports de recompilados com RT64): você pode instalar um
 driver **Mesa Turnip** em .zip e o jogo passa a usá-lo no lugar do driver do
-sistema.
+sistema — **direto pelo menu do jogo**, na opção **“GPU Driver”** (embaixo de
+Exit, no launcher).
 
 1. Baixe um driver Turnip — formatos aceitos: `.zip` **adrenotools** (ex.:
    [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers),
@@ -135,27 +138,34 @@ sistema.
    **Atenção à geração da GPU**: os zips são por geração — Adreno 6xx
    (ex.: Adreno 619 do moto g34 5G) usa os builds **a6xx**; builds a7xx/a8xx
    não expõem GPU neste aparelho.
-2. No app: **Instalar driver (.zip)…** → selecione o zip (ou `.so`). O app
-   **testa** o driver na hora (cria uma `VkInstance` e enumera as GPUs, o
-   mesmo caminho do RT64): se listar a GPU (“Driver verificado: Adreno (TM)
-   619…”), está pronto; se não listar nenhuma GPU Vulkan, a instalação é
-   **recusada** com instruções — sem isso o jogo falharia com “Unable to find
-   compatible graphics device”.
-3. Toque em **INICIAR JOGO**.
-4. Para voltar ao driver do sistema: **Remover driver**.
+2. No menu do jogo: **GPU Driver → Install driver (.zip)...** → escolha o zip
+   (ou `.so`) no seletor do Android. O app **testa** o driver na hora (cria uma
+   `VkInstance` e enumera as GPUs, o mesmo caminho do RT64): se listar a GPU
+   (“installed and verified: Adreno (TM) 619…”), está pronto; se não listar
+   nenhuma GPU Vulkan, a instalação é **recusada** com instruções — sem isso o
+   jogo falharia com “Unable to find compatible graphics device”.
+3. **Sair do app e abrir de novo** (o driver é carregado no início do RT64;
+   o menu Exit encerra o processo, então reabrir já aplica o novo driver).
+4. Para voltar ao driver do sistema: **GPU Driver → Use system driver**
+   (botão só aparece quando há driver custom ativo).
 
-O início do jogo agora é pelo botão **INICIAR JOGO** (a tela de setup continua
-acessível em todo launch). Requer Adreno + arm64; Android 10+ recomendado.
-Detalhes da implementação (incl. diagnóstico do bug “Unable to find compatible
-graphics device” e o probe de validação): [docs/DRIVER-VULKAN.md](docs/DRIVER-VULKAN.md).
+Requer Adreno + arm64; Android 10+ recomendado. Detalhes da implementação
+(incl. diagnóstico do bug “Unable to find compatible graphics device” e o
+probe de validação): [docs/DRIVER-VULKAN.md](docs/DRIVER-VULKAN.md).
 
 ## Notas técnicas do port
 
 - `libmain.so` (SDL2 estático + runtime + RT64) carregado via `SDLActivity`
   (`System.loadLibrary("main")` → `SDL_main`)
 - Paths do app injetados por `getArguments()` (filesDir/externalFilesDir)
+- **Toda a interação de arquivos acontece na UI do próprio jogo**: a opção
+  “Load ROM” e o menu “GPU Driver” abrem o DocumentsUI do Android via ponte
+  JNI não-bloqueante (`android/native/compat/file_bridge.cpp`); o resultado é
+  despachado por frame no `draw_hook` (patch do `ui_state.cpp`), no mesmo
+  contexto dos callbacks de menu. A tela Java de setup foi removida — o app
+  abre direto no SDL e só copia assets na 1ª execução (`AppSetup`)
 - `nativefiledialog-extended` e `curl` substituídos por *stubs* no Android
-  (diálogo de ROM = escaneamento de pasta + SAF; mod store offline)
+  (diálogo de ROM = SAF via DocumentsUI; mod store offline)
 - Patches aplicados aos submódulos `rt64`/`RecompFrontend` via `git apply`
   (`android/patches/*.patch`) — submódulos permanecem upstream
 - Vulkan via volk (`VK_NO_PROTOTYPES`): driver do sistema ou Turnip
@@ -174,6 +184,6 @@ graphics device” e o probe de validação): [docs/DRIVER-VULKAN.md](docs/DRIVE
 
 ### Trocar a ROM depois
 
-O app guarda uma cópia validada da ROM como `files/DK64.z64` (armazenamento
-interno). Se você trocar o arquivo na pasta externa, apague também a cópia
-interna para forçar a revalidação (o runtime valida por hash a cada início).
+O runtime guarda a ROM validada no config interno e a valida por hash a cada
+início. Para escolher outra ROM, limpe os dados do app (ou apenas o armazenamento
+interno) — o menu volta a oferecer **“Load ROM”** na próxima abertura.

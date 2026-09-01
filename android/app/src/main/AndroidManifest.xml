@@ -8,8 +8,9 @@
          - uses-feature required=false: não filtrar dispositivos sem
            touchscreen/gamepad/bluetooth/USB na instalação.
          - VIBRATE: SDL_Init(HAPTIC) em src/main/main.cpp usa o vibrador.
-         - Vulkan é checado em runtime (SetupActivity) com aviso, por isso
-           NÃO declaramos uses-feature vulkan.version required.
+         - Vulkan é validado em runtime pelo probe do custom_driver.cpp
+           (a tela Java de setup foi desativada), por isso NÃO declaramos
+           uses-feature vulkan.version required.
          ============================================================ -->
     <uses-feature
         android:name="android.hardware.touchscreen"
@@ -44,28 +45,22 @@
         android:theme="@style/AppTheme">
 
         <!-- Port Android do DK64: Recompiled — gamepad prioridade; touch para menus. -->
-        <!-- Launcher: prepara ROM + assets e só então inicia o SDL (MainActivity). -->
+        <!-- Launcher ÚNICA: o app abre direto no SDL. Os assets são copiados no -->
+        <!-- onCreate (AppSetup) e ROM/driver são escolhidos na UI do próprio jogo -->
+        <!-- (menu launcher -> SAF via file_bridge). -->
         <activity
-            android:name=".SetupActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
-            android:launchMode="singleTop"
+            android:alwaysRetainTaskState="true"
+            android:preferMinimalPostProcessing="true"
+            android:launchMode="singleTask"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|fontScale|keyboard|keyboardHidden|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- SDLActivity (fluxo padrão do SDL 2.30.8; sem overrides de ciclo de vida). -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape"
-            android:alwaysRetainTaskState="true"
-            android:preferMinimalPostProcessing="true"
-            android:launchMode="singleTask"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|fontScale|keyboard|keyboardHidden|navigation" />
     </application>
 
 </manifest>

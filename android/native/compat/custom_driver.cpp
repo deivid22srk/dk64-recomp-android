@@ -62,6 +62,7 @@
 #include <adrenotools/driver.h>
 
 #include "android_paths.h"
+#include "custom_driver.h"
 
 namespace {
 
@@ -87,6 +88,8 @@ struct CustomDriverState {
     bool attempted = false;
     bool active = false;
     void *proc_addr = nullptr;
+    // Nome amigável da seleção resolvida (para dk64driver::status_text).
+    std::string name;
     // Impressão digital da seleção JÁ RESOLVIDA (dir + library). Se o
     // selected.txt mudar (usuário instalou outro driver na mesma sessão),
     // recarregamos do zero — sem isso, o call_once original devolveria o
@@ -357,6 +360,7 @@ void ensure_loaded_locked() {
     g_probe = ProbeResult{};
     g_state.attempted = true;
     g_state.fingerprint = fingerprint;
+    g_state.name = hasSelection ? sel.name : std::string{};
 
     if (!hasSelection) {
         ALOGI("custom driver: nenhum driver selecionado, usando driver do sistema");
@@ -484,6 +488,52 @@ int dk64_adrenotools_custom_driver_active(void) {
     return g_state.active ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Menu "GPU Driver" do launcher (consumido por src/main/main.cpp no Android)
+// ---------------------------------------------------------------------------
+
+namespace dk64driver {
+
+std::string status_text() {
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    ensure_loaded_locked();
+
+    if (g_state.active) {
+        std::string text = "Custom driver: " + g_state.name;
+        if (g_probe.ok) {
+            text += "\nGPU: " + (g_probe.firstName.empty() ? std::string{"Vulkan device"} : g_probe.firstName);
+            if (!g_probe.apiVersion.empty()) text += " (Vulkan " + g_probe.apiVersion + ")";
+        }
+        text += "\n\nNote: the driver is loaded when the app starts. "
+                "Exit the app and open it again to switch to a newly installed driver.";
+        return text;
+    }
+
+    return "Using the system GPU driver.\n\n"
+           "You can install a Turnip driver (.zip, Adreno GPUs) for better "
+           "performance. The driver is loaded when the app starts, so exit and "
+           "reopen the app after installing.";
+}
+
+void reset_selection() {
+    // 1) Remove a seleção em disco (o Java também pode fazer isso, mas o menu
+    //    do jogo roda no processo do jogo — fazer aqui evita uma volta por JNI).
+    const std::string &files = androidport::internal_files_dir();
+    if (!files.empty()) {
+        std::remove((files + "/driver/selected.txt").c_str());
+    }
+
+    // 2) Invalida o cache: o próximo ensure_loaded_locked recarrega do zero
+    //    (sem seleção => driver do sistema). O probe é re-executado e passa a
+    //    refletir o driver do sistema.
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    g_state = CustomDriverState{};
+    g_probe = ProbeResult{};
+    ensure_loaded_locked();
+}
+
+} // namespace dk64driver
+
 /*
  * JNI — chamado pelo SetupActivity logo após instalar/selecionar um driver
  * (e disponível para diagnóstico). Recebe os paths do Java (getFilesDir e
@@ -527,6 +577,20 @@ Java_com_deivid22srk_dk64recomp_SetupActivity_nativeProbeCustomDriver(JNIEnv *en
     json += "}";
 
     return env->NewStringUTF(json.c_str());
+}
+
+/*
+ * Mesmo contrato do export do SetupActivity (mantido por compatibilidade),
+ * mas vinculado à classe GpuDriverInstaller — o instalador de driver sobreviveu
+ * à remoção da tela Java de setup e agora é acionado pelo menu "GPU Driver" do
+ * launcher do jogo (SAF via MainActivity -> GpuDriverInstaller -> este probe).
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_deivid22srk_dk64recomp_GpuDriverInstaller_nativeProbeCustomDriver(JNIEnv *env, jclass /*clazz*/,
+                                                                           jstring jFilesDir,
+                                                                           jstring jNativeLibDir) {
+    return Java_com_deivid22srk_dk64recomp_SetupActivity_nativeProbeCustomDriver(env, nullptr,
+                                                                                 jFilesDir, jNativeLibDir);
 }
 
 #else // !__ANDROID__

@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include "SDL_main.h"
 #include "android_paths.h"
+#include "custom_driver.h"
+#include "file_bridge.h"
 #include "virtual_pad.h"
 #else
 #define SDL_MAIN_HANDLED
@@ -659,6 +661,69 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
     recompui::renderer::trigger_texture_pack_update();
 }
 
+#ifdef __ANDROID__
+/*
+ * Menu "GPU Driver" do launcher (Android) — substitui a tela Java de setup
+ * removida: o usuário instala/remove o driver Turnip direto pela UI do jogo.
+ *
+ * Fluxo (tudo na thread de render, dentro do callback do GameOption):
+ *   1. SDL_ShowMessageBox modal com o status atual e os botões
+ *      [Install .zip...] [Use system driver] [Cancel] — diálogo da PRÓPRIA
+ *      Activity (AlertDialog do SDL), sem troca de Activity: seguro segurar
+ *      o contexto do menu aqui.
+ *   2. "Install" abre o DocumentsUI via file_bridge (não-bloqueante — a
+ *      Activity vai a pausa atrás do DocumentsUI e o resultado chega pelo
+ *      draw_hook quando o app volta; ver file_bridge.h).
+ *   3. O resultado (instalação + probe Vulkan, feito pelo Java em background)
+ *      volta como payload e é mostrado numa caixa informativa.
+ *
+ * O driver é carregado na inicialização do RT64, então a troca vale no
+ * PRÓXIMO início do app (Exit mata o processo — ver MainActivity.onDestroy).
+ */
+void show_android_gpu_driver_menu() {
+    const std::string status = dk64driver::status_text();
+
+    SDL_MessageBoxButtonData buttons[3]{};
+    int num_buttons = 0;
+    const int ID_INSTALL = 1;
+    const int ID_RESET = 2;
+    const int ID_CANCEL = 0;
+
+    buttons[num_buttons++] = { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, ID_INSTALL, "Install driver (.zip)..." };
+    if (dk64_adrenotools_custom_driver_active()) {
+        buttons[num_buttons++] = { 0, ID_RESET, "Use system driver" };
+    }
+    buttons[num_buttons++] = { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, ID_CANCEL, "Cancel" };
+
+    SDL_MessageBoxData data{};
+    data.flags = SDL_MESSAGEBOX_INFORMATION;
+    data.title = "GPU Driver";
+    data.message = status.c_str();
+    data.numbuttons = num_buttons;
+    data.buttons = buttons;
+
+    int buttonid = -1;
+    if (SDL_ShowMessageBox(&data, &buttonid) != 0) {
+        fprintf(stderr, "SDL_ShowMessageBox failed: %s\n", SDL_GetError());
+        return;
+    }
+
+    if (buttonid == ID_INSTALL) {
+        androidport::filedialog::request(androidport::filedialog::Kind::DriverZip,
+            [](bool ok, const std::string& payload) {
+                SDL_ShowSimpleMessageBox(
+                    ok ? SDL_MESSAGEBOX_INFORMATION : SDL_MESSAGEBOX_ERROR,
+                    "GPU Driver", payload.c_str(), nullptr);
+            });
+    } else if (buttonid == ID_RESET) {
+        dk64driver::reset_selection();
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "GPU Driver",
+            "Custom driver removed.\nThe system driver will be used the next time the app starts.",
+            nullptr);
+    }
+}
+#endif
+
 void on_launcher_init(recompui::LauncherMenu *menu) {
     auto game_options_menu = menu->init_game_options_menu(
         supported_games[0].game_id,
@@ -669,6 +734,12 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     );
 
     game_options_menu->add_default_options();
+#ifdef __ANDROID__
+    // Port Android: seleção do driver Vulkan (Turnip) direto no menu do jogo.
+    game_options_menu->add_option("GPU Driver", []() {
+        show_android_gpu_driver_menu();
+    });
+#endif
     game_options_menu->set_width(30, recompui::Unit::Percent);
 
     for (auto option : game_options_menu->get_options()) {

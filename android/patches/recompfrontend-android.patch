@@ -16,20 +16,92 @@ index 467c01b..114d42c 100644
  #define SLOT_MAP_FREE(ptr) free(ptr)
  #endif
  
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 277a421..ae5a247 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -22,6 +22,12 @@
+ #include "recompinput/recompinput.h"
+ #include "recompinput/profiles.h"
+ 
++#if defined(__ANDROID__)
++// Port Android: despacho dos resultados do SAF (ROM/driver escolhidos nos
++// menus do jogo) — ver android/native/compat/file_bridge.h.
++#include "file_bridge.h"
++#endif
++
+ #include "librecomp/game.hpp"
+ 
+ #include "base/ui_launcher.h"
+@@ -82,24 +88,24 @@ static bool can_focus(Rml::Element* element) {
+ // Get the first descending element whose tag name matches one of tags.
+ static Rml::Element* TagMatchRecursive(const Rml::StringList& tags, Rml::Element* element)
+ {
+-	const int num_children = element->GetNumChildren();
++        const int num_children = element->GetNumChildren();
+ 
+-	for (int i = 0; i < num_children; i++)
+-	{
+-		Rml::Element* child = element->GetChild(i);
++        for (int i = 0; i < num_children; i++)
++        {
++                Rml::Element* child = element->GetChild(i);
+ 
+-		for (const Rml::String& tag : tags)
+-		{
+-			if (child->GetTagName() == tag)
+-				return child;
+-		}
++                for (const Rml::String& tag : tags)
++                {
++                        if (child->GetTagName() == tag)
++                                return child;
++                }
+ 
+-		Rml::Element* matching_element = TagMatchRecursive(tags, child);
+-		if (matching_element)
+-			return matching_element;
+-	}
++                Rml::Element* matching_element = TagMatchRecursive(tags, child);
++                if (matching_element)
++                        return matching_element;
++        }
+ 
+-	return nullptr;
++        return nullptr;
+ }
+ 
+ Rml::Element* get_target(Rml::ElementDocument* document, Rml::Element* element) {
+@@ -662,6 +668,14 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ 
+     std::lock_guard lock{ ui_state_mutex };
+ 
++#if defined(__ANDROID__)
++    // Port Android: resultado de um SAF picker (Load ROM / GPU Driver) chegou
++    // enquanto o DocumentsUI estava na frente? Despacha aqui, na thread de
++    // render e sob o MESMO lock em que os callbacks de GameOption rodam —
++    // os lambdas podem tocar em elementos RmlUi (set_title etc.) com segurança.
++    androidport::filedialog::process_pending();
++#endif
++
+     SDL_Event cur_event{};
+ 
+     bool mouse_moved = false;
 diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
-index 7ee84ed..9952b10 100644
+index 7ee84ed..6de9ac0 100644
 --- a/recompui/src/util/file.cpp
 +++ b/recompui/src/util/file.cpp
-@@ -12,6 +12,8 @@
+@@ -12,6 +12,9 @@
  
  #if defined(_WIN32)
  #include <Shlobj.h>
 +#elif defined(__ANDROID__)
 +#include "android_paths.h"
++#include "file_bridge.h"
  #elif defined(__linux__)
  #include <unistd.h>
  #include <pwd.h>
-@@ -20,6 +22,7 @@
+@@ -20,6 +23,7 @@
  #endif
  
  namespace recompui {
@@ -37,7 +109,7 @@ index 7ee84ed..9952b10 100644
      static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
          nfdnchar_t* native_path = nullptr;
          nfdresult_t result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
-@@ -35,6 +38,9 @@ namespace recompui {
+@@ -35,6 +39,9 @@ namespace recompui {
          callback(success, path);
      }
  
@@ -47,7 +119,7 @@ index 7ee84ed..9952b10 100644
      static void perform_file_dialog_operation_multiple(const std::function<void(bool, const std::list<std::filesystem::path>&)>& callback) {
          const nfdpathset_t* native_paths = nullptr;
          nfdresult_t result = NFD_OpenDialogMultipleN(&native_paths, nullptr, 0, nullptr);
-@@ -58,7 +64,13 @@ namespace recompui {
+@@ -58,7 +65,13 @@ namespace recompui {
          callback(success, paths);
      }
  
@@ -61,7 +133,7 @@ index 7ee84ed..9952b10 100644
          // directly check for portable.txt (windows and native linux binary)
          if (std::filesystem::exists("portable.txt")) {
              return std::filesystem::current_path();
-@@ -112,10 +124,14 @@ namespace recompui {
+@@ -112,10 +125,16 @@ namespace recompui {
  #endif
  
          return recomp_dir;
@@ -71,28 +143,32 @@ index 7ee84ed..9952b10 100644
      std::filesystem::path file::get_program_path() {
 -#if defined(__APPLE__)
 +#if defined(__ANDROID__)
-+        // Port Android: assets do APK copiados para filesDir/assets pelo SetupActivity.
++        // Port Android: assets do APK copiados para filesDir/assets na 1ª execução
++        // (AppSetup.java, chamado no onCreate do MainActivity — a tela Java de
++        // setup foi desativada; ROM e driver agora são escolhidos na UI do jogo).
 +        return std::filesystem::path{androidport::internal_files_dir()};
 +#elif defined(__APPLE__)
          return file::apple::get_bundle_resource_directory();
  #elif defined(__linux__) && defined(RECOMP_FLATPAK)
          return "/app/bin";
-@@ -129,7 +145,13 @@ namespace recompui {
+@@ -129,7 +148,15 @@ namespace recompui {
      }
  
      void file::open_file_dialog(std::function<void(bool success, const std::filesystem::path& path)> callback) {
 -#ifdef __APPLE__
 +#if defined(__ANDROID__)
-+        // Port Android: sem NFD — escaneia os diretórios do app por uma ROM
-+        // (.z64/.n64/.v64); o runtime valida o hash e faz byteswap em select_rom.
-+        std::string rom_path;
-+        const bool found = androidport::find_rom_file(rom_path);
-+        callback(found, found ? std::filesystem::path{rom_path} : std::filesystem::path{});
++        // Port Android: sem NFD — abre o seletor SAF do Android (DocumentsUI) via
++        // ponte JNI (file_bridge). O resultado é despachado no draw_hook (patch do
++        // ui_state.cpp) e o runtime valida o hash/faz byteswap em select_rom.
++        androidport::filedialog::request(androidport::filedialog::Kind::Rom,
++            [callback](bool ok, const std::string& picked_path) {
++                callback(ok, ok ? std::filesystem::path{picked_path} : std::filesystem::path{});
++            });
 +#elif defined(__APPLE__)
          file::apple::dispatch_on_ui_thread([callback]() {
              perform_file_dialog_operation(callback);
          });
-@@ -139,7 +161,9 @@ namespace recompui {
+@@ -139,7 +166,9 @@ namespace recompui {
      }
  
      void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
