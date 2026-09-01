@@ -45,7 +45,7 @@ void set_active(bool active) {
     }
 }
 
-bool wait_while_backgrounded(const volatile bool &running) {
+bool wait_while_backgrounded(const std::atomic<bool> &running) {
     std::unique_lock<std::mutex> lock(g_mutex);
 
     if (g_active) return false;
@@ -53,7 +53,7 @@ bool wait_while_backgrounded(const volatile bool &running) {
     bool frozen = false;
     while (!g_active) {
         // Shutdown da PresentQueue (destrutor): não segurar o join.
-        if (running == false) return frozen;
+        if (running.load(std::memory_order_relaxed) == false) return frozen;
         g_cv.wait_for(lock, std::chrono::milliseconds(2));
         frozen = true;
     }

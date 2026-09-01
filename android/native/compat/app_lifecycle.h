@@ -27,6 +27,8 @@
 #ifndef ANDROID_APP_LIFECYCLE_H
 #define ANDROID_APP_LIFECYCLE_H
 
+#include <atomic>
+
 namespace androidport::lifecycle {
 
 /* Marcado pelo Java (JNI em app_lifecycle.cpp). Padrão: true (ativo). */
@@ -36,9 +38,10 @@ void set_active(bool active);
  * Bloqueia a thread chamadora enquanto o app estiver em segundo plano.
  * Retorna true se chegou a ficar congelada (o chamador DEVE tratar a surface
  * do swapchain como obsoleta e recriá-la). Checa `running` a cada despertar:
- * quando virar false (shutdown da PresentQueue), retorna imediatamente.
+ * quando virar false (shutdown da PresentQueue — std::atomic<bool> no rt64
+ * atual), retorna imediatamente.
  */
-bool wait_while_backgrounded(const volatile bool &running);
+bool wait_while_backgrounded(const std::atomic<bool> &running);
 
 } // namespace androidport::lifecycle
 
