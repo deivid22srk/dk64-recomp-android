@@ -280,6 +280,12 @@ endif()
 if(TARGET recompui)
     target_include_directories(recompui PRIVATE "${ANDROID_PORT_DIR}/native/compat")
 endif()
+# Patch do rt64 (rt64_present_queue.cpp) usa app_lifecycle.h — congelamento da
+# present queue enquanto o app está em segundo plano (DocumentsUI/Home), que
+# evita o SIGSEGV do driver Adreno ao apresentar em surface destruída.
+if(TARGET rt64)
+    target_include_directories(rt64 PRIVATE "${ANDROID_PORT_DIR}/native/compat")
+endif()
 
 # ----------------------------------------------------------------------------
 # 6) Código recompilado (gerado no host antes deste build — ver CI)
@@ -358,6 +364,9 @@ set(MAIN_SOURCES
     "${ANDROID_PORT_DIR}/native/compat/custom_driver.cpp"
     # Ponte SAF <-> menus do recomp (ROM/driver escolhidos na UI do próprio jogo)
     "${ANDROID_PORT_DIR}/native/compat/file_bridge.cpp"
+    # Congelamento da render em segundo plano (onPause/surfaceDestroyed — o
+    # gate vive na PresentQueue do rt64 via app_lifecycle.h)
+    "${ANDROID_PORT_DIR}/native/compat/app_lifecycle.cpp"
     # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
     "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )

@@ -211,6 +211,28 @@ public class MainActivity extends SDLActivity {
     /** Publica o resultado do SAF para o menu do jogo (implementado em file_bridge.cpp). */
     private static native void nativeOnFilePicked(int kind, boolean ok, String payload);
 
+    /**
+     * Congela/libera a present thread do RT64 (implementado em app_lifecycle.cpp).
+     * false = app em segundo plano: a renderização para ANTES do Android destruir
+     * a Surface (onPause chega ~600 ms antes do surfaceDestroyed); true = há
+     * surface nova em primeiro plano: a thread recria VkSurface + swapchain e
+     * retoma. Sem isto, o driver Vulkan da Adreno crasha ao apresentar em
+     * surface destruída (crash ao abrir o seletor de ROM/driver).
+     */
+    private static native void nativeSetAppActive(boolean active);
+
+    @Override
+    public void onPause() {
+        // ANTES do super (que sinaliza a pausa do SDL): congela a present
+        // thread o quanto antes — surfaceDestroyed chega logo depois.
+        try {
+            nativeSetAppActive(false);
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "nativeSetAppActive(false) indisponível: " + e.getMessage());
+        }
+        super.onPause();
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         // SEMPRE chamar o super: SDLActivity usa este ponto para
@@ -225,6 +247,19 @@ public class MainActivity extends SDLActivity {
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                             | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_FULLSCREEN);
+
+            // Libera a present thread (congelada em onPause). O retorno de
+            // foco é o ÚLTIMO evento do ciclo de volta do DocumentsUI/Home —
+            // a surface nova (quando houve surfaceDestroyed) já foi entregue
+            // ao SDL. Se em algum aparelho a surface atrasar, não há crash:
+            // o plume só limpa a marca de "surface obsoleta" quando o rebuild
+            // tem sucesso, e a PresentQueue repete a tentativa a cada quadro
+            // até a janela nova chegar.
+            try {
+                nativeSetAppActive(true);
+            } catch (UnsatisfiedLinkError e) {
+                Log.e(TAG, "nativeSetAppActive(true) indisponível: " + e.getMessage());
+            }
         }
     }
 

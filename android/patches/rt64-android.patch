@@ -153,3 +153,59 @@ index 08f83e5..6347b98 100755
  #   elif defined(__linux__)
          XWindowAttributes attributes;
          XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 3227ab1..eb417f7 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -7,6 +7,13 @@
+ #include "common/rt64_thread.h"
+ #include "rhi/rt64_render_hooks.h"
+ 
++#if defined(__ANDROID__)
++// Port DK64-Recomp Android: congelamento em segundo plano (DocumentsUI/Home).
++// O include é resolvido pelo alvo rt64 via target_include_directories no
++// CMake do app (android/native/compat).
++#include "app_lifecycle.h"
++#endif
++
+ #include "rt64_workload_queue.h"
+ 
+ namespace RT64 {
+@@ -257,7 +264,13 @@ namespace RT64 {
+         }
+ 
+         // Create the framebuffers if necessary.
+-        if (swapChainFramebuffers.empty()) {
++        // Port DK64-Recomp Android: só com swapchain VÁLIDO. Quando resize()
++        // falha (surface destruída em segundo plano), os textures ainda
++        // referem imagens do swapchain morto — criar framebuffers neles
++        // derruba o driver Adreno (SIGSEGV). A fila de framebuffers volta a
++        // ser preenchida quando a surface renascer e o resize() tiver
++        // sucesso (elas são limpas no ramo do resize).
++        if (swapChainValid && swapChainFramebuffers.empty()) {
+             uint32_t textureCount = ext.swapChain->getTextureCount();
+             swapChainFramebuffers.resize(textureCount);
+             for (uint32_t i = 0; i < textureCount; i++) {
+@@ -463,6 +476,22 @@ namespace RT64 {
+                 }
+             }
+ 
++#if defined(__ANDROID__)
++            // Port DK64-Recomp Android: congela a present queue enquanto o app
++            // está em segundo plano (ex.: DocumentsUI aberto pela seleção de
++            // ROM/driver na UI do jogo, tecla Home). Sem isto a thread segue
++            // apresentando em uma surface DESTRUÍDA (onPause -> onPause do
++            // Android -> surfaceDestroyed) e o driver Vulkan da Adreno crasha
++            // (SIGSEGV no vkCreateFramebuffer após vkCreateSwapchainKHR falhar
++            // na surface morta — visto no moto g34 5G). Retorno `true` = ficou
++            // congelada: a surface do swapchain pode ter sido SUBSTITUÍDA —
++            // força a recriação de VkSurface + swapchain no próximo resize.
++            if (androidport::lifecycle::wait_while_backgrounded(presentThreadRunning)) {
++                swapChainValid = false;
++                ext.swapChain->invalidateSurface();
++            }
++#endif
++
+             if (processCursor >= 0) {
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;

@@ -1,3 +1,21 @@
+diff --git a/plume_render_interface.h b/plume_render_interface.h
+index 2048557..7f3095b 100644
+--- a/plume_render_interface.h
++++ b/plume_render_interface.h
+@@ -103,6 +103,13 @@ namespace plume {
+ 
+         // Only valid if displayTiming is enabled in capabilities.
+         virtual uint32_t getRefreshRate() const = 0;
++
++        // Port DK64-Recomp Android: marca a surface nativa como obsoleta (a
++        // Activity foi pausada e o Android destruiu/substituiu a Surface).
++        // O próximo resize() destrói a VkSurface antiga e cria outra a partir
++        // da janela atual antes de recriar o swapchain. No-op por padrão nos
++        // backends sem esse problema (D3D12/Metal).
++        virtual void invalidateSurface() { }
+     };
+ 
+     struct RenderFramebuffer {
 diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
 index 9dcfedf..a657973 100644
 --- a/plume_render_interface_types.h
@@ -19,7 +37,7 @@ index 9dcfedf..a657973 100644
      struct RenderWindow {
          Display* display;
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index f1dd503..d8fcc26 100644
+index f1dd503..21dd89b 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -10,6 +10,24 @@
@@ -134,7 +152,82 @@ index f1dd503..d8fcc26 100644
          }
  
          // Pick the preferred color space, if not available, pick whatever first shows up on the list.
-@@ -2704,7 +2788,7 @@ namespace plume {
+@@ -2309,9 +2393,74 @@ namespace plume {
+         }
+     }
+ 
++    void VulkanSwapChain::invalidateSurface() {
++        // Port DK64-Recomp Android: apenas marca — a recriação real acontece
++        // no próximo resize() (chamado pela PresentQueue ao voltar do
++        // congelamento em segundo plano; ver rt64_present_queue.cpp).
++        androidSurfaceStale = true;
++    }
++
+     bool VulkanSwapChain::resize() {
+         getWindowSize(width, height);
+ 
++#if defined(__ANDROID__) && defined(PLUME_SDL_VULKAN_ENABLED)
++        // Port DK64-Recomp Android: a Activity foi pausada e o Android
++        // DESTRUIU a Surface (surfaceDestroyed) — a VkSurfaceKHR antiga foi
++        // criada a partir de um ANativeWindow que não existe mais, e ao
++        // retornar o SDL passa a usar um NOVO ANativeWindow. Recrie a
++        // VkSurfaceKHR a partir da janela atual antes de recriar o swapchain,
++        // senão vkCreateSwapchainKHR falha para sempre (e o RT64 recriava
++        // framebuffers sobre textures de um swapchain morto — SIGSEGV no
++        // driver Adreno).
++        if (androidSurfaceStale) {
++            VulkanInterface *staleInterface = commandQueue->device->renderInterface;
++
++            // Espera a GPU terminar com as imagens antigas antes de destruir.
++            vkDeviceWaitIdle(commandQueue->device->vk);
++
++            releaseImageViews();
++
++            if (vk != VK_NULL_HANDLE) {
++                vkDestroySwapchainKHR(commandQueue->device->vk, vk, nullptr);
++                vk = VK_NULL_HANDLE;
++            }
++
++            if (surface != VK_NULL_HANDLE) {
++                vkDestroySurfaceKHR(staleInterface->instance, surface, nullptr);
++                surface = VK_NULL_HANDLE;
++            }
++
++            SDL_SysWMinfo wmInfo;
++            SDL_VERSION(&wmInfo.version);
++            if (SDL_GetWindowWMInfo(desc.renderWindow, &wmInfo) == SDL_TRUE &&
++                wmInfo.subsystem == SDL_SYSWM_ANDROID &&
++                wmInfo.info.android.window != nullptr) {
++                VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
++                surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++                surfaceCreateInfo.window = wmInfo.info.android.window;
++                VkResult sres = vkCreateAndroidSurfaceKHR(staleInterface->instance, &surfaceCreateInfo, nullptr, &surface);
++                if (sres == VK_SUCCESS) {
++                    // Só limpa a marca em caso de SUCESSO: se a janela nova
++                    // ainda não chegou ao SDL (surfaceChanged pendente), o
++                    // flag permanece e a PresentQueue tenta de novo a cada
++                    // quadro até a surface renascer.
++                    androidSurfaceStale = false;
++                } else {
++                    fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X (surface rebuild).\n", sres);
++                }
++            } else {
++                fprintf(stderr, "Surface rebuild skipped: no native window yet (SDL: %s).\n", SDL_GetError());
++            }
++
++            // Sem surface válida não há como consultar capacidades nem criar
++            // swapchain — falhe cedo (a PresentQueue tenta de novo no próximo
++            // quadro, quando a surface nova já tiver chegado ao SDL).
++            if (surface == VK_NULL_HANDLE) {
++                return false;
++            }
++        }
++#endif
++
+         // Don't recreate the swap chain at all if the window doesn't have a valid size.
+         if ((width == 0) || (height == 0)) {
+             return false;
+@@ -2704,7 +2853,7 @@ namespace plume {
      }
  
      void VulkanQueryPool::queryResults() {
@@ -143,7 +236,7 @@ index f1dd503..d8fcc26 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkGetQueryPoolResults failed with error code 0x%X.\n", res);
              return;
-@@ -4131,7 +4215,22 @@ namespace plume {
+@@ -4131,7 +4280,22 @@ namespace plume {
          capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
          capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
          capabilities.presentWait = presentWaitSupported;
@@ -166,7 +259,7 @@ index f1dd503..d8fcc26 100644
          capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
          capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
          capabilities.dynamicDepthBias = true;
-@@ -4464,11 +4563,30 @@ namespace plume {
+@@ -4464,11 +4628,30 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -197,3 +290,26 @@ index f1dd503..d8fcc26 100644
  
          appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
          appInfo.pApplicationName = "plume";
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 0a1edbe..78f140a 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -241,6 +241,10 @@ namespace plume {
+         uint64_t currentPresentId = 0;
+         bool immediatePresentModeSupported = false;
+         bool mailboxPresentModeSupported = false;
++        // Port DK64-Recomp Android: surface nativa marcada como obsoleta pelo
++        // gate de segundo plano (app_lifecycle + PresentQueue). O próximo
++        // resize() recria a VkSurfaceKHR a partir da SDL_Window atual.
++        bool androidSurfaceStale = false;
+ 
+         VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc);
+         ~VulkanSwapChain() override;
+@@ -248,6 +252,7 @@ namespace plume {
+         void wait() override;
+         bool resize() override;
+         bool needsResize() const override;
++        void invalidateSurface() override;
+         void setVsyncEnabled(bool vsyncEnabled) override;
+         bool isVsyncEnabled() const override;
+         uint32_t getWidth() const override;
