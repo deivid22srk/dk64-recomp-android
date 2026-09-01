@@ -154,7 +154,7 @@ index 08f83e5..6347b98 100755
          XWindowAttributes attributes;
          XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 3227ab1..eb417f7 100644
+index 3227ab1..b41e64b 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
 @@ -7,6 +7,13 @@
@@ -186,7 +186,7 @@ index 3227ab1..eb417f7 100644
              uint32_t textureCount = ext.swapChain->getTextureCount();
              swapChainFramebuffers.resize(textureCount);
              for (uint32_t i = 0; i < textureCount; i++) {
-@@ -463,6 +476,22 @@ namespace RT64 {
+@@ -463,6 +476,40 @@ namespace RT64 {
                  }
              }
  
@@ -197,10 +197,28 @@ index 3227ab1..eb417f7 100644
 +            // apresentando em uma surface DESTRUÍDA (onPause -> onPause do
 +            // Android -> surfaceDestroyed) e o driver Vulkan da Adreno crasha
 +            // (SIGSEGV no vkCreateFramebuffer após vkCreateSwapchainKHR falhar
-+            // na surface morta — visto no moto g34 5G). Retorno `true` = ficou
-+            // congelada: a surface do swapchain pode ter sido SUBSTITUÍDA —
-+            // força a recriação de VkSurface + swapchain no próximo resize.
-+            if (androidport::lifecycle::wait_while_backgrounded(presentThreadRunning)) {
++            // na surface morta — visto no moto g34 5G).
++            //
++            // Há dois sinais independentes:
++            //   1. wait_while_backgrounded() bloqueia quando g_active=false.
++            //      Retorno `true` significa que a thread ficou CONGELADA — a
++            //      surface provavelmente foi SUBSTITUÍDA nesse ínterim e
++            //      precisa de recriação.
++            //   2. consume_surface_dirty() é setado pelo Java via
++            //      nativeSurfaceState() em surfaceCreated/surfaceDestroyed/
++            //      surfaceChanged (eventos do SurfaceHolder.Callback). Ele
++            //      cobre o caso degenerado do DocumentsUI, em que
++            //      onWindowFocusChanged(true) libera o gate PREMATURAMENTE
++            //      (micro-flutuação antes do surfaceDestroyed real chegar
++            //      ~700 ms depois) — nesse cenário a thread nunca chega a
++            //      ficar congelada e precisa ser notificada por outro caminho.
++            //
++            // Qualquer um dos dois dispara a recriação: swapChainValid=false
++            // + ext.swapChain->invalidateSurface() (o próximo resize() destrói
++            // a VkSurface antiga e cria outra a partir da SDL_Window atual).
++            const bool wasFrozen = androidport::lifecycle::wait_while_backgrounded(presentThreadRunning);
++            const bool surfaceDirty = androidport::lifecycle::consume_surface_dirty();
++            if (wasFrozen || surfaceDirty) {
 +                swapChainValid = false;
 +                ext.swapChain->invalidateSurface();
 +            }

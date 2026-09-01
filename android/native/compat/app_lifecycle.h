@@ -14,10 +14,26 @@
  *   - Java (MainActivity.onPause) chama nativeSetAppActive(false) assim que a
  *     Activity sai da frente (ANTES do surfaceDestroyed, que chega ~600 ms
  *     depois) → a present thread congela no início da próxima iteração.
- *   - Java (MainActivity.surfaceChanged / onWindowFocusChanged(true)) chama
- *     nativeSetAppActive(true) quando há surface nova em primeiro plano → a
- *     present thread acorda e recria VkSurface + swapchain (plume
- *     invalidateSurface + resize) antes de apresentar de novo.
+ *   - Java (MainActivity.onWindowFocusChanged(true)) chama nativeSetAppActive
+ *     (true) quando há surface nova em primeiro plano → a present thread
+ *     acorda e recria VkSurface + swapchain (plume invalidateSurface + resize)
+ *     antes de apresentar de novo.
+ *
+ * BUG CORRIGIDO (este commit): a flag de "surface obsoleta" precisava ser
+ * sinalizada INDEPENDENTEMENTE do gate de segundo plano, porque:
+ *   - o DocumentsUI mostra uma micro-flutuação de foco (onPause +
+ *     onWindowFocusChanged(true) + onWindowFocusChanged(false)) ANTES da
+ *     surfaceDestroyed real chegar (~700 ms depois no moto g34 5G). O gate é
+ *     liberado nesse onWindowFocusChanged(true) prematuro, e a thread
+ *     continua rodando com g_active=true quando a surface morre;
+ *   - mesmo que a thread seja congelada em algum momento, ela precisa
+ *     REINICIAR o swapchain ao voltar (invalidateSurface + resize), senão
+ *     vkCreateSwapchainKHR é chamado em uma VkSurfaceKHR antiga que referencia
+ *     um ANativeWindow destruído.
+ * nativeMarkSurfaceDirty() é o sinal independente — consumido pelo gate na
+ * PresentQueue: marca swapChainValid=false e chama ext.swapChain
+ * ->invalidateSurface() antes do próximo resize(), sem depender de ter ou não
+ * ficado congelado.
  *
  * Thread-safety: wait_while_backgrounded() pode ser chamada da present thread
  * a cada iteração do loop (custo desprezível quando ativo). `running` é o
@@ -42,6 +58,20 @@ void set_active(bool active);
  * atual), retorna imediatamente.
  */
 bool wait_while_backgrounded(const std::atomic<bool> &running);
+
+/*
+ * Marca a surface nativa como obsoleta (Surface foi destruída/substituída
+ * pelo Android). Lido pela PresentQueue no próximo turno para forçar
+ * swapChainValid=false + invalidateSurface() antes do resize(). Idempotente.
+ */
+void mark_surface_dirty();
+
+/*
+ * Retorna (e limpa) a marca "surface foi destruída". Retorna true exatamente
+ * UMA vez após cada mark_surface_dirty() — usado pelo PresentQueue para
+ * detectar o evento sem precisar registrar um callback no Java.
+ */
+bool consume_surface_dirty();
 
 } // namespace androidport::lifecycle
 

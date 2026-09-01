@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -105,6 +106,59 @@ public class MainActivity extends SDLActivity {
                 Log.e(TAG, "JNI do gamepad virtual indisponível: " + e.getMessage());
                 virtualPadView = null;
             }
+        }
+
+        // SurfaceHolder.Callback para o ciclo de vida da Surface nativa.
+        // - Os métodos nativos estáticos do SDLActivity (onNativeSurfaceCreated,
+        //   etc.) já são chamados pelo SDLSurface; precisamos de um sinal nosso
+        //   para o gate de present thread, porque o gate do Java (onPause +
+        //   onWindowFocusChanged) é propenso a falsos positivos pela
+        //   flutuação de foco durante a abertura do DocumentsUI. O caminho
+        //   Surface→ANativeWindow→SDL é determinístico: cada surfaceCreated
+        //   corresponde exatamente a um novo ANativeWindow no SDL_Window.
+        // - O callback é registrado UMA VEZ (mSurface é estático, mas o
+        //   callback seria re-registrado em recriações de Activity, então
+        //   checamos por nulidade).
+        if (mSurface != null && dk64SurfaceCallback == null) {
+            dk64SurfaceCallback = new SurfaceHolder.Callback() {
+                @Override public void surfaceCreated(SurfaceHolder holder) {
+                    Log.i(TAG, "DK64 SurfaceHolder: surfaceCreated");
+                    try { nativeSurfaceState(1); } catch (UnsatisfiedLinkError e) {
+                        Log.e(TAG, "nativeSurfaceState(1) indisponível: " + e.getMessage());
+                    }
+                    // surfaceCreated chega DEPOIS de onResume no ciclo de
+                    // retorno do DocumentsUI: é o momento DETERMINÍSTICO de
+                    // surface válida, então liberamos o gate de Activity aqui
+                    // (substitui a antiga liberação em onWindowFocusChanged).
+                    try { nativeSetAppActive(true); } catch (UnsatisfiedLinkError e) {
+                        Log.e(TAG, "nativeSetAppActive(true) indisponível: " + e.getMessage());
+                    }
+                }
+                @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                    // Mudança de tamanho/formato: a VkSurface pode ter sido
+                    // recriada (ANativeWindow novo) e o swapchain precisa de
+                    // resize. Sinalizamos para a PresentQueue forçar a
+                    // recriação no próximo turno, mesmo que o gate já esteja
+                    // aberto (evita o loop vkCreateSwapchainKHR em surface
+                    // trocada silenciosamente pelo SurfaceView BLAST).
+                    Log.i(TAG, "DK64 SurfaceHolder: surfaceChanged " + width + "x" + height);
+                    try { nativeSurfaceState(2); } catch (UnsatisfiedLinkError e) {
+                        Log.e(TAG, "nativeSurfaceState(2) indisponível: " + e.getMessage());
+                    }
+                }
+                @Override public void surfaceDestroyed(SurfaceHolder holder) {
+                    // Surface prestes a ser INVALIDADA: o Java (gate de
+                    // Activity) também fecha em onPause, mas com gap de
+                    // ~600 ms; precisamos do sinal determinístico aqui para
+                    // que a PresentQueue force a recriação mesmo se o gate
+                    // já tiver sido liberado por uma flutuação de foco.
+                    Log.i(TAG, "DK64 SurfaceHolder: surfaceDestroyed");
+                    try { nativeSurfaceState(0); } catch (UnsatisfiedLinkError e) {
+                        Log.e(TAG, "nativeSurfaceState(0) indisponível: " + e.getMessage());
+                    }
+                }
+            };
+            mSurface.getHolder().addCallback(dk64SurfaceCallback);
         }
     }
 
@@ -218,8 +272,35 @@ public class MainActivity extends SDLActivity {
      * surface nova em primeiro plano: a thread recria VkSurface + swapchain e
      * retoma. Sem isto, o driver Vulkan da Adreno crasha ao apresentar em
      * surface destruída (crash ao abrir o seletor de ROM/driver).
+     *
+     * BUG EVITADO: este hook NÃO é mais chamado em onWindowFocusChanged(true),
+     * porque a flutuação de foco durante a abertura do DocumentsUI gera um
+     * "true" PREMATURO (em torno de 700 ms ANTES do surfaceDestroyed real),
+     * liberando a present thread enquanto a surface ainda está prestes a
+     * morrer — a thread entra em loop infinito de vkCreateSwapchainKHR em
+     * surface abandonada (tela preta). A liberação AGORA acontece apenas em
+     * surfaceCreated() (caminho determinístico). Veja nativeSurfaceState().
      */
     private static native void nativeSetAppActive(boolean active);
+
+    /**
+     * Sinaliza o ciclo de vida da Surface nativa (implementado em
+     * app_lifecycle.cpp). state: 0 = surfaceDestroyed, 1 = surfaceCreated,
+     * 2 = surfaceChanged.
+     *
+     * É o sinal DETERMINÍSTICO de surface (in)válida: o gate de Activity
+     * (nativeSetAppActive) é reativo e propenso a falsos positivos pela
+     * flutuação de foco, mas o caminho Surface→ANativeWindow→SDL é
+     * determinístico — cada surfaceCreated/surfaceDestroyed corresponde
+     * exatamente a um novo ANativeWindow no SDL_Window. A PresentQueue
+     * consome esta marca para forçar swapChainValid=false + invalidateSurface()
+     * mesmo com g_active=true (cobre o gap de 700 ms+ entre o foco
+     * prematuro e o surfaceDestroyed do DocumentsUI).
+     */
+    private static native void nativeSurfaceState(int state);
+
+    /** Callback anexado ao SurfaceHolder da SDLSurface para observar surfaceCreated/Destroyed/Changed. */
+    private SurfaceHolder.Callback dk64SurfaceCallback;
 
     @Override
     public void onPause() {
@@ -248,18 +329,22 @@ public class MainActivity extends SDLActivity {
                             | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_FULLSCREEN);
 
-            // Libera a present thread (congelada em onPause). O retorno de
-            // foco é o ÚLTIMO evento do ciclo de volta do DocumentsUI/Home —
-            // a surface nova (quando houve surfaceDestroyed) já foi entregue
-            // ao SDL. Se em algum aparelho a surface atrasar, não há crash:
-            // o plume só limpa a marca de "surface obsoleta" quando o rebuild
-            // tem sucesso, e a PresentQueue repete a tentativa a cada quadro
-            // até a janela nova chegar.
-            try {
-                nativeSetAppActive(true);
-            } catch (UnsatisfiedLinkError e) {
-                Log.e(TAG, "nativeSetAppActive(true) indisponível: " + e.getMessage());
-            }
+            // NÃO chamamos mais nativeSetAppActive(true) aqui: o
+            // onWindowFocusChanged(true) dispara durante a micro-flutuação
+            // que acontece ANTES do surfaceDestroyed real chegar (ex.:
+            // DocumentsUI sobreposto — visto no moto g34 5G com gap de
+            // ~700 ms entre o foco temporário e o surfaceDestroyed). Liberar
+            // o gate nesse momento faz a present thread acordar em uma
+            // surface prestes a morrer e entrar em loop infinito de
+            // vkCreateSwapchainKHR em surface abandonada (tela preta).
+            //
+            // A liberação AGORA acontece via nativeSurfaceState(1) em
+            // surfaceCreated() — o sinal determinístico de surface válida.
+            // Quem precisa notificar a thread sobre surface obsoleta usa
+            // nativeSurfaceState(0) em surfaceDestroyed(), que cobre o caso
+            // de o gate ter sido liberado prematuramente pela flutuação de
+            // foco (consume_surface_dirty() na PresentQueue força a recriação
+            // do swapchain mesmo com g_active=true).
         }
     }
 
