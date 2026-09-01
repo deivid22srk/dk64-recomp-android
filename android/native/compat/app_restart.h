@@ -46,6 +46,8 @@
 
 #ifdef __cplusplus
 namespace dk64 {
+
+#if defined(__ANDROID__)
 /*
  * Pede ao MainActivity para finalizar a Activity (que mata o processo
  * via Process.killProcess no onDestroy, configurado no handler de
@@ -57,15 +59,25 @@ namespace dk64 {
  * incondicionalmente, então precisamos do stub inline abaixo para o
  * compilador em desktop — sem ele, o linker reclamaria de símbolo
  * indefinido.
- *
- * Sob Android, app_restart.cpp fornece a definição real (declarada
- * no bloco #if defined(__ANDROID__) abaixo).
  */
-#if defined(__ANDROID__)
 void native_request_app_restart();
+
+/*
+ * Cache da JavaVM injetada pelo Java (MainActivity.nativeBridgeInit).
+ * Necessária porque o NDK Android NÃO exporta JNI_GetCreatedJavaVMs
+ * diretamente para a linkedição do libmain.so (precisaríamos de
+ * libnativehelper ou dlopen de libart.so — frágil entre versões do
+ * Android). A VM é registrada via JNI_OnLoad-like hook chamado pelo
+ * Java no onCreate (ver MainActivity.nativeBridgeInit).
+ *
+ * Sob Android, app_restart.cpp fornece a definição real.
+ */
+void set_java_vm(void *vm);
 #else
 inline void native_request_app_restart() { /* no-op fora do Android */ }
+inline void set_java_vm(void *) { /* no-op fora do Android */ }
 #endif
+
 } // namespace dk64
 #endif // __cplusplus
 

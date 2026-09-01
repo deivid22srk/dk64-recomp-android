@@ -89,6 +89,17 @@ public class MainActivity extends SDLActivity {
             Log.e(TAG, "JNI da ponte de arquivos indisponível: " + e.getMessage());
         }
 
+        // Registra a JavaVM no módulo de reinício (app_restart.cpp). O JavaVM*
+        // é cacheado em g_vm e usado por dk64::native_request_app_restart()
+        // para resolver MainActivity.handleNativeAppRestart() via JNI. Sem
+        // isso, o menu "GPU Driver" não consegue finalizar a Activity após
+        // trocar o driver Vulkan.
+        try {
+            nativeRestartInit();
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "JNI de reinício do app indisponível: " + e.getMessage());
+        }
+
         // Gamepad virtual: overlay transparente por cima do SDLSurface.
         // - A libmain.so já foi carregada por super.onCreate (loadLibraries),
         //   então os métodos JNI do VirtualPadView já estão vinculáveis.
@@ -261,6 +272,9 @@ public class MainActivity extends SDLActivity {
 
     /** Registro da JavaVM para a ponte de arquivos (implementado em file_bridge.cpp). */
     private static native void nativeBridgeInit();
+
+    /** Registro da JavaVM para reinício do app (implementado em app_restart.cpp). */
+    private static native void nativeRestartInit();
 
     /** Publica o resultado do SAF para o menu do jogo (implementado em file_bridge.cpp). */
     private static native void nativeOnFilePicked(int kind, boolean ok, String payload);
