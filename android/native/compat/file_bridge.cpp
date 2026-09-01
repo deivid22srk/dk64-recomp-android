@@ -34,6 +34,21 @@ constexpr const char *kMainActivity = "com/deivid22srk/dk64recomp/MainActivity";
 std::mutex g_mutex;
 JavaVM *g_vm = nullptr;
 
+/*
+ * Cache de classe/método JNI. POR QUE ISTO EXISTE: FindClass em thread NATIVA
+ * anexada via AttachCurrentThread (a present thread do RT64 — nunca rodou
+ * código Java, portanto sem frames Java) resolve através do classloader do
+ * SISTEMA, que não conhece classes do app — FindClass("...MainActivity")
+ * falhava SEMPRE ali, request() devolvia false e o DocumentsUI (gerenciador
+ * de arquivos do Android) NUNCA abria, tanto para a ROM quanto para o driver
+ * Turnip. O cache é populado em nativeBridgeInit — chamada JNI originada no
+ * Java (MainActivity.onCreate, UI thread): o frame chamador pertence ao
+ * PathClassLoader do app, então FindClass funciona — e uma referência GLOBAL
+ * + methodID são válidos em qualquer thread daqui em diante.
+ */
+jclass g_main_class = nullptr;     // global ref de MainActivity
+jmethodID g_mid_request = nullptr; // MainActivity.requestFilePicker(I)Z
+
 enum class State {
     Idle,    // nenhum pedido em aberto
     Waiting, // SAF picker aberto (ou resultado em processamento no Java)
@@ -47,9 +62,62 @@ std::string g_payload;
 Callback g_callback;
 
 /*
+ * Popula o cache JNI (classe global + methodID) se ainda não existir.
+ * Segura para qualquer thread: em thread nativa anexada o FindClass falha
+ * (classloader do sistema), mas aí o cache já foi populado no
+ * nativeBridgeInit (thread Java) e esta função é um no-op.
+ */
+bool ensure_jni_cache(JNIEnv *env) {
+    if (env == nullptr) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_main_class != nullptr && g_mid_request != nullptr) return true;
+    }
+
+    jclass local = env->FindClass(kMainActivity);
+    if (local == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        ALOGE("file bridge: FindClass(%s) falhou (thread nativa sem cache "
+              "populado? nativeBridgeInit não rodou)", kMainActivity);
+        return false;
+    }
+
+    jclass global = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    if (global == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        ALOGE("file bridge: NewGlobalRef(MainActivity) falhou");
+        return false;
+    }
+
+    jmethodID mid = env->GetStaticMethodID(global, "requestFilePicker", "(I)Z");
+    if (mid == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteGlobalRef(global);
+        ALOGE("file bridge: requestFilePicker(I)Z não encontrado");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_main_class == nullptr) {
+            g_main_class = global;
+            g_mid_request = mid;
+        } else {
+            // Outra thread venceu a corrida: descarta a cópia deste thread.
+            env->DeleteGlobalRef(global);
+        }
+    }
+    return true;
+}
+
+/*
  * Chama MainActivity.requestFilePicker(kind) (static, boolean). Pode rodar na
  * thread de present do RT64 (não anexada à JVM): anexa na 1ª chamada e mantém
  * anexada — o processo é curto e o número de threads é pequeno.
+ *
+ * IMPORTANTE: NÃO chamar FindClass aqui direto — veja ensure_jni_cache().
  */
 bool call_java_request(Kind kind) {
     JavaVM *vm = g_vm;
@@ -66,19 +134,14 @@ bool call_java_request(Kind kind) {
         }
     }
 
-    jclass cls = env->FindClass(kMainActivity);
-    if (cls == nullptr) {
-        ALOGE("file bridge: FindClass(%s) falhou", kMainActivity);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        return false;
-    }
+    if (!ensure_jni_cache(env)) return false;
 
-    jmethodID mid = env->GetStaticMethodID(cls, "requestFilePicker", "(I)Z");
-    if (mid == nullptr) {
-        ALOGE("file bridge: requestFilePicker(I)Z não encontrado");
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteLocalRef(cls);
-        return false;
+    jclass cls = nullptr;
+    jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        cls = g_main_class;
+        mid = g_mid_request;
     }
 
     jboolean res = env->CallStaticBooleanMethod(cls, mid, static_cast<jint>(kind));
@@ -86,11 +149,9 @@ bool call_java_request(Kind kind) {
         ALOGE("file bridge: exceção Java em requestFilePicker");
         env->ExceptionDescribe();
         env->ExceptionClear();
-        env->DeleteLocalRef(cls);
         return false;
     }
 
-    env->DeleteLocalRef(cls);
     if (!res) ALOGE("file bridge: Java recusou o pedido (Activity indisponível?)");
     return res == JNI_TRUE;
 }
@@ -182,7 +243,20 @@ Java_com_deivid22srk_dk64recomp_MainActivity_nativeBridgeInit(JNIEnv *env, jclas
     JavaVM *vm = nullptr;
     if (env->GetJavaVM(&vm) == JNI_OK && vm != nullptr) {
         androidport::filedialog::set_java_vm(vm);
-        __android_log_print(ANDROID_LOG_INFO, "DK64Recomp", "file bridge: JavaVM registrada");
+        /*
+         * Popula o cache de classe/método AQUI, na thread que fez a chamada
+         * Java (UI thread): FindClass funciona neste contexto (o frame
+         * chamador — MainActivity.nativeBridgeInit — pertence ao classloader
+         * do app). Na present thread do RT64 o FindClass NÃO encontraria a
+         * classe e o gerenciador de arquivos nunca abriria.
+         */
+        if (androidport::filedialog::ensure_jni_cache(env)) {
+            __android_log_print(ANDROID_LOG_INFO, "DK64Recomp",
+                                "file bridge: JavaVM registrada + classe/método em cache");
+        } else {
+            __android_log_print(ANDROID_LOG_ERROR, "DK64Recomp",
+                                "file bridge: JavaVM registrada, mas o cache JNI falhou");
+        }
     }
 }
 

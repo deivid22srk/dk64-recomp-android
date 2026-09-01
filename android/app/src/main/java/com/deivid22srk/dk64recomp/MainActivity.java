@@ -171,6 +171,12 @@ public class MainActivity extends SDLActivity {
      * Chamado via JNI pela thread de render (file_bridge.cpp). Posta o Intent
      * SAF na UI thread e devolve na hora — a troca de Activity (DocumentsUI)
      * e o processamento do resultado ficam inteiramente do lado Java.
+     *
+     * ATENÇÃO: o nativo guarda um slot único em "Waiting" enquanto o picker
+     * está aberto. Qualquer falha ABRIR o Intent precisa publicar
+     * nativeOnFilePicked(kind, false, ...) — sem isso o slot fica preso para
+     * sempre e TODO pedido seguinte é recusado no file_bridge (silêncio total
+     * nos botões "Load ROM"/"GPU Driver").
      */
     public static boolean requestFilePicker(int kind) {
         final Activity activity = mSingleton;
@@ -187,6 +193,13 @@ public class MainActivity extends SDLActivity {
                         kind == KIND_ROM ? PICK_ROM_REQUEST : PICK_DRIVER_REQUEST);
             } catch (Exception e) {
                 Log.e(TAG, "Falha ao abrir o seletor SAF", e);
+                // Libera o slot no nativo e mostra o erro no menu do jogo.
+                try {
+                    nativeOnFilePicked(kind, false,
+                            "Could not open the Android file manager: " + e.getMessage());
+                } catch (UnsatisfiedLinkError ule) {
+                    Log.e(TAG, "nativeOnFilePicked indisponível: " + ule.getMessage());
+                }
             }
         });
         return true;
