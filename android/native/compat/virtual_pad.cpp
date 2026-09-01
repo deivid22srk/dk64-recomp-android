@@ -149,10 +149,10 @@ void call_java_game_started(bool started) {
 
 } // namespace
 
-bool init_jni(void* env_ptr, void* clazz_ptr) {
+bool init_jni(void* env_ptr, void* thiz_ptr) {
     JNIEnv* env = static_cast<JNIEnv*>(env_ptr);
-    jclass local = static_cast<jclass>(clazz_ptr);
-    if (env == nullptr || local == nullptr) {
+    jobject thiz = static_cast<jobject>(thiz_ptr);
+    if (env == nullptr || thiz == nullptr) {
         return false;
     }
 
@@ -165,7 +165,23 @@ bool init_jni(void* env_ptr, void* clazz_ptr) {
         env->GetJavaVM(&s.vm);
     }
     if (s.view_class == nullptr) {
+        // IMPORTANTE: nativeInit() é um método de INSTÂNCIA no Kotlin, então o
+        // JNI entrega `thiz` (o objeto VirtualPadView) no 2º parâmetro — NÃO a
+        // classe. Passar esse objeto como jclass ao GetStaticMethodID aborta o
+        // runtime (CheckJNI: "jclass has wrong type"). Obtenha o jclass por
+        // FindClass, com fallback para GetObjectClass(thiz).
+        jclass local = env->FindClass("com/deivid22srk/dk64recomp/VirtualPadView");
+        if (local == nullptr) {
+            env->ExceptionClear();
+            local = env->GetObjectClass(thiz);
+        }
+        if (local == nullptr) {
+            env->ExceptionClear();
+            VP_LOG("classe VirtualPadView nao encontrada");
+            return false;
+        }
         jclass global = static_cast<jclass>(env->NewGlobalRef(local));
+        env->DeleteLocalRef(local);
         s.view_class = global;
         s.method_on_game_started = env->GetStaticMethodID(
             global, "onGameStarted", "(Z)V");
@@ -260,18 +276,21 @@ void shutdown_jni() {
 
 #define VP_JNI extern "C" __attribute__((visibility("default"))) JNIEXPORT
 
+// Métodos externos de instância: o 2º parâmetro JNI é o objeto (`thiz`),
+// jamais um jclass.
+
 VP_JNI jboolean JNICALL
-Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeInit(JNIEnv* env, jclass clazz) {
-    return androidport::virtualpad::init_jni(env, clazz) ? JNI_TRUE : JNI_FALSE;
+Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeInit(JNIEnv* env, jobject thiz) {
+    return androidport::virtualpad::init_jni(env, thiz) ? JNI_TRUE : JNI_FALSE;
 }
 
 VP_JNI void JNICALL
-Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeButton(JNIEnv*, jclass, jint id, jboolean pressed) {
+Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeButton(JNIEnv*, jobject, jint id, jboolean pressed) {
     androidport::virtualpad::set_button(static_cast<int>(id), pressed == JNI_TRUE);
 }
 
 VP_JNI void JNICALL
-Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeAxis(JNIEnv*, jclass, jfloat x, jfloat y) {
+Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeAxis(JNIEnv*, jobject, jfloat x, jfloat y) {
     androidport::virtualpad::set_stick(static_cast<float>(x), static_cast<float>(y));
 }
 

@@ -45,8 +45,11 @@ enum ButtonId : int {
 };
 
 // Chamado pelo Java na criação do overlay: cacheia JavaVM/jclass para o
-// callback onGameStarted. Seguro chamar mais de uma vez (reinit é ignorado).
-bool init_jni(void* env, void* clazz);
+// callback onGameStarted. `view` é o `thiz` da instância VirtualPadView
+// (método de instância no Kotlin — o JNI NÃO entrega um jclass aqui; a classe
+// é obtida via FindClass/GetObjectClass dentro da função). Seguro chamar mais
+// de uma vez (reinit é ignorado).
+bool init_jni(void* env, void* view);
 
 // True se o overlay Java já inicializou a ponte.
 bool is_bridge_ready();
