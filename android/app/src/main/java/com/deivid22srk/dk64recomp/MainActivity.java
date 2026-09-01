@@ -412,4 +412,32 @@ public class MainActivity extends SDLActivity {
     private static String absolutePathOrEmpty(File dir) {
         return dir != null ? dir.getAbsolutePath() : "";
     }
+
+    /**
+     * Handler do pedido de reinício vindo do nativo (app_restart.cpp). Roda
+     * na thread de render do RT64 (o nativo dispara daqui). O SDL está
+     * bloqueado no loop de eventos do RT64, então finalizar a Activity direto
+     * daqui é seguro: o super.onDestroy da SDLActivity para o SDL, e o
+     * MainActivity.onDestroy mata o processo.
+     *
+     * O nativo já exibiu a caixa de mensagem com o resultado do install/remove
+     * antes de chamar isto (caixa modal do SDL, bloqueia a render thread até
+     * o usuário fechar) — ver show_android_gpu_driver_menu() em src/main/main.cpp.
+     */
+    public static void handleNativeAppRestart() {
+        Log.i(TAG, "handleNativeAppRestart: finalizando Activity para reinício "
+                + "(driver Vulkan mudou; o app será reaberto pelo launcher)");
+        final SDLActivity activity = mSingleton;
+        if (activity == null || activity.isFinishing()) {
+            Log.w(TAG, "handleNativeAppRestart: Activity indisponível/terminando — "
+                    + "nada a fazer; o usuário precisa reabrir o app manualmente");
+            return;
+        }
+        // Garante que o callback rode na UI thread (finish() precisa).
+        activity.runOnUiThread(() -> {
+            if (!activity.isFinishing()) {
+                activity.finish();
+            }
+        });
+    }
 }

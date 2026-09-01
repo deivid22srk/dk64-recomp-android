@@ -504,15 +504,16 @@ std::string status_text() {
             text += "\nGPU: " + (g_probe.firstName.empty() ? std::string{"Vulkan device"} : g_probe.firstName);
             if (!g_probe.apiVersion.empty()) text += " (Vulkan " + g_probe.apiVersion + ")";
         }
-        text += "\n\nNote: the driver is loaded when the app starts. "
-                "Exit the app and open it again to switch to a newly installed driver.";
+        text += "\n\nThe driver is already loaded for this session. To switch to "
+                "a different driver, install it again and the app will restart "
+                "automatically.";
         return text;
     }
 
     return "Using the system GPU driver.\n\n"
            "You can install a Turnip driver (.zip, Adreno GPUs) for better "
-           "performance. The driver is loaded when the app starts, so exit and "
-           "reopen the app after installing.";
+           "performance. After installing, the app will restart automatically "
+           "to load the new driver.";
 }
 
 void reset_selection() {

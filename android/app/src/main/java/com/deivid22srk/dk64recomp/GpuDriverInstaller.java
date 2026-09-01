@@ -196,7 +196,7 @@ public final class GpuDriverInstaller {
 
         if (probeJson == null) {
             return "Driver \"" + friendlyName + "\" installed.\n\n"
-                    + "It will be used the next time the app starts.";
+                    + "The app will now restart to load the new driver.";
         }
 
         try {
@@ -212,7 +212,7 @@ public final class GpuDriverInstaller {
                 return "Driver \"" + friendlyName + "\" installed and verified: "
                         + (device.isEmpty() ? "Vulkan GPU" : device)
                         + (api.isEmpty() ? "" : " (Vulkan " + api + ")")
-                        + ".\n\nIt will be used the next time the app starts.";
+                        + ".\n\nThe app will now restart to load the new driver.";
             }
 
             // Recusado — rollback da seleção (mesma política da SetupActivity).
@@ -235,7 +235,7 @@ public final class GpuDriverInstaller {
         } catch (Exception ex) {
             Log.w(TAG, "Probe JSON inválido", ex);
             return "Driver \"" + friendlyName + "\" installed (probe unavailable).\n\n"
-                    + "It will be used the next time the app starts.";
+                    + "The app will now restart to load the new driver.";
         }
     }
 

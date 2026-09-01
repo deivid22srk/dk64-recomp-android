@@ -1,0 +1,26 @@
+{
+  "project_name": "DK64 Recompiled — fix seleção de driver Vulkan",
+  "repo_url": "https://github.com/deivid22srk/dk64-recomp-android",
+  "status": "portando",
+  "last_update": "2026-09-01T23:32:52Z",
+  "steps": [
+    { "id": "investigacao", "name": "Investigação do bug (log + screenshot + código)", "status": "done", "notes": "Log 01_09-19-34-08_380.log: Turnip carregado e probe OK, mas o Vulkan (volkInitialize) já inicializou com o driver do sistema. Start Game → SIGSEGV no thread [Game] MAIN (vkCreateGraphicsPipelines falhando, vkAllocateDescriptorSets falhando).", "time": "2026-09-01T23:16:04Z" },
+    { "id": "diagnostico", "name": "Diagnóstico: a troca de driver exige reinício do app", "status": "done", "notes": "plume/RT64 chama volkInitializeCustom() UMA VEZ no construtor de VulkanInterface. Trocar driver no mesmo processo deixa a VkInstance ativa em mismatch com o ICD que o adrenotools injetou via hooks.", "time": "2026-09-01T23:16:04Z" },
+    { "id": "app_restart_h", "name": "Header app_restart.h com namespace dk64 + stub desktop", "status": "done", "notes": "Cria android/native/compat/app_restart.h com dk64::native_request_app_restart() (real no Android, no-op fora).", "time": "2026-09-01T23:32:52Z" },
+    { "id": "app_restart_cpp", "name": "app_restart.cpp com dispatch JNI idempotente", "status": "done", "notes": "Resolve MainActivity via JNI FindClass, chama handleNativeAppRestart()V. atomic<bool> g_restart_requested para idempotência. DeleteLocalRef sempre.", "time": "2026-09-01T23:32:52Z" },
+    { "id": "java_handler", "name": "MainActivity.handleNativeAppRestart finaliza Activity", "status": "done", "notes": "Método estático que pega mSingleton, chama runOnUiThread+finish() se não está terminando. onDestroy já existente mata o processo (Process.killProcess).", "time": "2026-09-01T23:32:52Z" },
+    { "id": "menu_message", "name": "Mensagens do menu GPU Driver atualizadas", "status": "done", "notes": "Texto 'It will be used the next time' substituído por 'The app will now restart to load the new driver' em main.cpp e GpuDriverInstaller.java. status_text() também atualizado.", "time": "2026-09-01T23:32:52Z" },
+    { "id": "menu_restart", "name": "Menu GPU Driver dispara request_app_restart_after_delay", "status": "done", "notes": "Após install/remove do driver, mostra SDL_ShowSimpleMessageBox e dispara std::thread com 800ms de delay chamando dk64::native_request_app_restart().", "time": "2026-09-01T23:32:52Z" },
+    { "id": "cmake", "name": "app_restart.cpp adicionado ao CMakeLists", "status": "done", "notes": "Adicionado em android/app/CMakeLists.txt junto com android_paths.cpp, custom_driver.cpp, file_bridge.cpp, app_lifecycle.cpp, virtual_pad.cpp.", "time": "2026-09-01T23:32:52Z" },
+    { "id": "compilacao", "name": "Build via GitHub Actions build.yml", "status": "pending", "notes": "Push para origin/fix/swapchain-destroyed-after-saf-foreground-flutter dispara o workflow.", "time": "" },
+    { "id": "teste_real", "name": "Teste real no dispositivo (moto g34 5G)", "status": "pending", "notes": "Instalar APK, repetir fluxo: GPU Driver → Install → WN-Turnip → reinício automático → Start Game sem SIGSEGV.", "time": "" }
+  ],
+  "log": [
+    { "time": "2026-09-01T23:16:04Z", "level": "info", "message": "Repositório clonado na branch fix/swapchain-destroyed-after-saf-foreground-flutter" },
+    { "time": "2026-09-01T23:16:04Z", "level": "info", "message": "Log 01_09-19-34-08_380.log analisado — Turnip instalado, probe OK, SIGSEGV no [Game] MAIN" },
+    { "time": "2026-09-01T23:16:04Z", "level": "success", "message": "Causa raiz: volkInitialize roda antes do SAF; troca de driver sem reinício é impossível" },
+    { "time": "2026-09-01T23:32:52Z", "level": "info", "message": "Plano: forçar reinício do app após install/remove do driver via JNI→MainActivity.finish→killProcess" },
+    { "time": "2026-09-01T23:32:52Z", "level": "success", "message": "app_restart.h/cpp criados; main.cpp e MainActivity.java atualizados; CMakeLists inclui o novo .cpp" },
+    { "time": "2026-09-01T23:32:52Z", "level": "info", "message": "Validação sintática: clang++ -fsyntax-only OK para app_restart.cpp e o trecho novo de main.cpp" }
+  ]
+}

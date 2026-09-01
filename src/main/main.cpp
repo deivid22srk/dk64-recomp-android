@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <cinttypes>
 #include <chrono>
+#include <thread>
 
 #include "nfd.h"
 
@@ -20,6 +21,7 @@
 #include "custom_driver.h"
 #include "file_bridge.h"
 #include "virtual_pad.h"
+#include "app_restart.h"
 #else
 #define SDL_MAIN_HANDLED
 #endif
@@ -676,10 +678,44 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
  *      draw_hook quando o app volta; ver file_bridge.h).
  *   3. O resultado (instalação + probe Vulkan, feito pelo Java em background)
  *      volta como payload e é mostrado numa caixa informativa.
+ *   4. Após install/remove, o app É REINICIADO (ver nota abaixo) — clicar
+ *      "Start Game" sem reiniciar é o bug original.
  *
- * O driver é carregado na inicialização do RT64, então a troca vale no
- * PRÓXIMO início do app (Exit mata o processo — ver MainActivity.onDestroy).
+ * POR QUE O APP PRECISA REINICIAR APÓS TROCAR O DRIVER:
+ *   o plume/RT64 inicializa o Vulkan UMA VEZ por processo, no construtor de
+ *   plume::VulkanInterface (chamado em rt64_application.cpp::createDeviceInterface
+ *   na primeira criação de swapchain). Lá, volkInitializeCustom é invocado com
+ *   o vkGetInstanceProcAddr do driver resolvido no INÍCIO do processo (via
+ *   dk64_adrenotools_get_instance_proc_addr, definida em custom_driver.cpp).
+ *   Se o usuário instala/remove o driver pelo menu, a VkInstance ativa já
+ *   existe, vinculada ao driver ANTERIOR. Recarregar o adrenotools nessa
+ *   hora injeta os hooks (libmain_hook.so) que redirecionam dlopen("vulkan.adreno.so")
+ *   para o novo driver, mas a VkInstance/device/swapchain ativos continuam
+ *   amarrados ao driver anterior — qualquer operação subsequente (recriar
+ *   device, recriar swapchain) é um SIGSEGV (visto no log
+ *   01_09-19-34-08_380.log: vkCreateGraphicsPipelines falhando, depois
+ *   vkAllocateDescriptorSets falhando, depois crash no thread [Game] MAIN).
+ *   A única solução robusta é reiniciar o processo: o MainActivity.onDestroy
+ *   já mata o processo (Process.killProcess) para zerar estáticos, e o
+ *   launcher do Android reabre o app em cold start, com o driver novo lido
+ *   de files/driver/selected.txt.
  */
+namespace {
+void request_app_restart_after_delay(int delay_ms) {
+    /*
+     * Dispara o pedido de reinício num pequeno delay para que o SDL tenha
+     * tempo de processar o retorno da SDL_ShowSimpleMessageBox (que mostrou
+     * o resultado) e voltar ao loop de eventos antes de finalizar a Activity.
+     * Sem o delay, finish() roda dentro do callback da MessageBox, o que
+     * pode travar a UI thread em alguns Androids.
+     */
+    std::thread([delay_ms]() {
+        if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        dk64::native_request_app_restart();
+    }).detach();
+}
+} // namespace
+
 void show_android_gpu_driver_menu() {
     const std::string status = dk64driver::status_text();
 
@@ -711,15 +747,27 @@ void show_android_gpu_driver_menu() {
     if (buttonid == ID_INSTALL) {
         androidport::filedialog::request(androidport::filedialog::Kind::DriverZip,
             [](bool ok, const std::string& payload) {
-                SDL_ShowSimpleMessageBox(
-                    ok ? SDL_MESSAGEBOX_INFORMATION : SDL_MESSAGEBOX_ERROR,
-                    "GPU Driver", payload.c_str(), nullptr);
+                if (ok) {
+                    // Sucesso: avisa que o driver foi instalado E que o app
+                    // vai reiniciar para aplicá-lo. SEM o restart, o RT64
+                    // continua rodando com o driver da inicialização (ver
+                    // nota acima) e o próximo Start Game crasha.
+                    const std::string full = payload
+                        + "\n\nThe app will now restart to load the new driver.";
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
+                        "GPU Driver", full.c_str(), nullptr);
+                    request_app_restart_after_delay(800);
+                } else {
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                        "GPU Driver", payload.c_str(), nullptr);
+                }
             });
     } else if (buttonid == ID_RESET) {
         dk64driver::reset_selection();
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "GPU Driver",
-            "Custom driver removed.\nThe system driver will be used the next time the app starts.",
+            "Custom driver removed.\nThe app will now restart to load the system driver.",
             nullptr);
+        request_app_restart_after_delay(800);
     }
 }
 #endif

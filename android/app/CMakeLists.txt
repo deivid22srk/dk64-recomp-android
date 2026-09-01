@@ -367,6 +367,11 @@ set(MAIN_SOURCES
     # Congelamento da render em segundo plano (onPause/surfaceDestroyed — o
     # gate vive na PresentQueue do rt64 via app_lifecycle.h)
     "${ANDROID_PORT_DIR}/native/compat/app_lifecycle.cpp"
+    # Reinício limpo do app após troca de driver Vulkan (o plume/RT64 só
+    # inicializa o Vulkan uma vez por processo, então trocar o driver sem
+    # reiniciar deixa a VkInstance ativa em mismatch com o novo ICD que o
+    # adrenotools acabou de injetar — SIGSEGV ao iniciar o jogo).
+    "${ANDROID_PORT_DIR}/native/compat/app_restart.cpp"
     # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
     "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )
