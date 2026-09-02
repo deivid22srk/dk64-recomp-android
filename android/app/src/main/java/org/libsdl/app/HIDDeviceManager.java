@@ -193,7 +193,15 @@ public class HIDDeviceManager {
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         filter.addAction(HIDDeviceManager.ACTION_USB_PERMISSION);
-        mContext.registerReceiver(mUsbBroadcast, filter);
+        // Port Android: targetSdk 34 exige RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED
+        // ao registrar receptores — sem a flag o Android 14+ lança
+        // SecurityException e o hid_init morre (HID USB/Bluetooth morto).
+        // Mesma correção do SDL upstream (libsdl-org/SDL, HIDDeviceManager).
+        if (Build.VERSION.SDK_INT >= 33) { /* Android 13.0 (TIRAMISU) */
+            mContext.registerReceiver(mUsbBroadcast, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            mContext.registerReceiver(mUsbBroadcast, filter);
+        }
 
         for (UsbDevice usbDevice : mUsbManager.getDeviceList().values()) {
             handleUsbDeviceAttached(usbDevice);
@@ -404,7 +412,14 @@ public class HIDDeviceManager {
         IntentFilter filter = new IntentFilter();
         filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
         filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
-        mContext.registerReceiver(mBluetoothBroadcast, filter);
+        // Port Android: RECEIVER_EXPORTED obrigatório a partir do targetSdk 34
+        // (Android 14) — sem a flag, registerReceiver lança e o Bluetooth
+        // morre junto com o hid_init. Mesma correção do SDL upstream.
+        if (Build.VERSION.SDK_INT >= 33) { /* Android 13.0 (TIRAMISU) */
+            mContext.registerReceiver(mBluetoothBroadcast, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            mContext.registerReceiver(mBluetoothBroadcast, filter);
+        }
 
         if (mIsChromebook) {
             mHandler = new Handler(Looper.getMainLooper());

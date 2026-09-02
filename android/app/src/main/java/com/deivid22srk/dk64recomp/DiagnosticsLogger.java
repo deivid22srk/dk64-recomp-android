@@ -418,12 +418,54 @@ public final class DiagnosticsLogger {
     // Leitor de logcat
     // ==================================================================
 
+    /*
+     * Ruído benigno CONHECIDO, filtrado antes de contar/escrever — sem isto
+     * o log fica ilegível (centenas de linhas por sessão) e o resumo acusa
+     * falsos erros/avisos. Cada padrão foi verificado num log real:
+     *  - "Access denied finding property": leitura de props vendor.mesa.* e
+     *    vendor.display.* pelo Turnip/Mesa e pelo SDL em aparelho SEM root
+     *    — comportamento normal, sem qualquer efeito.
+     *  - Sondas de formato do gralloc (4x4) na inicialização do RT64/plume:
+     *    o gralloc da Qualcomm não mapeia os formatos de sonda (0x38/0x3b)
+     *    e a alocação 4x4 falha — a sonda serve exatamente para marcar o
+     *    formato como não-suportado. Esperado em todo Adreno + Turnip.
+     *  - "AUDIO_OUTPUT_FLAG_FAST denied by client": fallback de latência do
+     *    AAudio (TRANSFER_SYNC nunca recebe fast track) — sem impacto.
+     *  - "libdolphin.so": lib proprietária de game-boost da Qualcomm que o
+     *    stack de perf do vendor tenta carregar dentro do processo (o app
+     *    é reconhecido como jogo); opcional e ausente em vários aparelhos.
+     *  - InteractionJankMonitor / "Unknown dataspace 0": avisos do framework
+     *    sem efeito funcional.
+     */
+    private static final String[] NOISE_SUBSTRINGS = {
+            "Access denied finding property",
+            "GetGpuPixelFormat: No map for format",
+            "validate_memory_layout_input_parmas",
+            "adreno_init_memory_layout",
+            "Graphics metadata init failed",
+            "isSupported(1, 1,",
+            "Failed to allocate (4 x 4)",
+            "GraphicBuffer(w=4, h=4",
+            "AUDIO_OUTPUT_FLAG_FAST denied by client",
+            "Unable to open libdolphin.so",
+            "InteractionJankMonitor",
+            "Unknown dataspace 0",
+    };
+
+    private static boolean isNoise(String line) {
+        for (String n : NOISE_SUBSTRINGS) {
+            if (line.contains(n)) return true;
+        }
+        return false;
+    }
+
     private void drainLogcat(Session s, Process lc) {
         try (BufferedReader r = new BufferedReader(
                 new InputStreamReader(lc.getInputStream(), Charset.forName("UTF-8")), 16 * 1024)) {
             int unimportantSinceFlush = 0;
             String line;
             while ((line = r.readLine()) != null) {
+                if (isNoise(line)) continue; // ruído benigno conhecido: não vira log nem estatística
                 char level = levelOf(line);
                 boolean important = (level == 'E' || level == 'F' || level == 'W');
                 boolean flush = important || (++unimportantSinceFlush >= FLUSH_EVERY_N);
