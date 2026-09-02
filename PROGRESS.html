@@ -160,8 +160,8 @@
 {
   "project_name": "DK64 Recompiled — fix seleção de driver Vulkan",
   "repo_url": "https://github.com/deivid22srk/dk64-recomp-android",
-  "status": "portando",
-  "last_update": "2026-09-01T23:32:52Z",
+  "status": "build_ci",
+  "last_update": "2026-09-02T00:57:27Z",
   "steps": [
     {
       "id": "investigacao",
@@ -188,7 +188,7 @@
       "id": "app_restart_cpp",
       "name": "app_restart.cpp com dispatch JNI idempotente",
       "status": "done",
-      "notes": "Resolve MainActivity via JNI FindClass, chama handleNativeAppRestart()V. atomic<bool> g_restart_requested para idempotência. DeleteLocalRef sempre.",
+      "notes": "Resolve MainActivity via JNI FindClass, chama handleNativeAppRestart()V. atomic<bool> g_restart_requested para idempotência. JavaVM cacheada via JNI_OnLoad-like export (nativeRestartInit) — corrige link error JNI_GetCreatedJavaVMs.",
       "time": "2026-09-01T23:32:52Z"
     },
     {
@@ -220,11 +220,18 @@
       "time": "2026-09-01T23:32:52Z"
     },
     {
+      "id": "gitlink_fix",
+      "name": "Corrigir gitlinks de submodules acidentalmente alterados",
+      "status": "done",
+      "notes": "git add -A incluiu N64ModernRuntime e RecompFrontend em commits errados (heads/main sem librecomp/config.hpp). Revertido para os commits originais (45bd018 e 6d187f7).",
+      "time": "2026-09-02T00:57:27Z"
+    },
+    {
       "id": "compilacao",
       "name": "Build via GitHub Actions build.yml",
-      "status": "pending",
-      "notes": "Push para origin/fix/swapchain-destroyed-after-saf-foreground-flutter dispara o workflow.",
-      "time": ""
+      "status": "done",
+      "notes": "Run 33576162788: SUCCESS em 10m49s. Build do APK passou com app_restart.cpp incluído. Anotações apenas de deprecation (Node 20/setup-java v4) — não bloqueiam.",
+      "time": "2026-09-02T00:57:27Z"
     },
     {
       "id": "teste_real",
@@ -261,9 +268,24 @@
       "message": "app_restart.h/cpp criados; main.cpp e MainActivity.java atualizados; CMakeLists inclui o novo .cpp"
     },
     {
-      "time": "2026-09-01T23:32:52Z",
+      "time": "2026-09-01T23:49:23Z",
+      "level": "error",
+      "message": "Build falhou: JNI_GetCreatedJavaVMs não linkado (NDK não exporta o símbolo) — corrigido cacheando JavaVM via nativeRestartInit"
+    },
+    {
+      "time": "2026-09-01T23:54:50Z",
+      "level": "error",
+      "message": "Build falhou: librecomp/config.hpp não encontrado — git add -A alterou gitlinks de N64ModernRuntime/RecompFrontend para heads/main"
+    },
+    {
+      "time": "2026-09-02T00:57:27Z",
+      "level": "success",
+      "message": "Gitlinks corrigidos para commits originais; Build run 33576162788 PASSED (10m49s) com app_restart.cpp"
+    },
+    {
+      "time": "2026-09-02T00:57:27Z",
       "level": "info",
-      "message": "Validação sintática: clang++ -fsyntax-only OK para app_restart.cpp e o trecho novo de main.cpp"
+      "message": "Próximo passo: teste real no moto g34 5G — instalar APK e validar fluxo de troca de driver com reinício automático"
     }
   ]
 }
