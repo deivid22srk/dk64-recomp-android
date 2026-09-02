@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DK64: Recompiled</string>
+
+    <!-- Diagnóstico (tela de logs) -->
+    <string name="diagnostics_title">Logs e diagnóstico</string>
+    <string name="diag_shortcut_short">Logs de diagnóstico</string>
+    <string name="diag_shortcut_long">Logs e diagnóstico do jogo</string>
 </resources>
