@@ -30,6 +30,17 @@ const std::string& native_library_dir();
  */
 void set_runtime_paths(const char* internal_dir, const char* native_lib_dir);
 
+/*
+ * Injeta APENAS o nativeLibraryDir (JNI do MainActivity.onCreate —
+ * nativeSetRuntimePaths). Separação de propósito: no onCreate a SDLThread já
+ * pode estar rodando init_from_args() em paralelo (que escreve
+ * internal/external a partir do argv) — escrever os MESMOS globals aqui seria
+ * uma corrida de dados (mesmo com valor igual). g_native_lib_dir NÃO é
+ * escrito por init_from_args, então esta função não disputa nada.
+ * Usado por custom_driver.cpp como hookLibDir do adrenotools em TODA sessão.
+ */
+void set_native_library_dir(const char* native_lib_dir);
+
 // Chamado uma única vez no início do main() no Android.
 void init_from_args(int argc, char** argv);
 

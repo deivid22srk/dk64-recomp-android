@@ -594,6 +594,39 @@ Java_com_deivid22srk_dk64recomp_GpuDriverInstaller_nativeProbeCustomDriver(JNIEn
                                                                                  jFilesDir, jNativeLibDir);
 }
 
+/*
+ * BUG CORRIGIDO (driver "perdido"/não carregado ao fechar e reabrir o app):
+ * em um cold start normal NENHUM código chamava set_runtime_paths — o
+ * nativeLibraryDir (hookLibDir exigido pelo libadrenotools, em contrato) só era
+ * preenchido pela via do probe JNI, e o ensure_loaded_locked dependia do
+ * FALLBACK de /proc/self/maps para achá-lo. Qualquer anomalia de mapeamento
+ * (loader de OEM, layout de extração) deixava o hookLibDir vazio e o driver
+ * simplesmente não carregava na reabertura — embora o probe da INSTALAÇÃO
+ * (que recebe o path do Java) funcionasse: o padrão exato de "funciona ao
+ * instalar, perde ao reabrir". O MainActivity agora injeta o
+ * ApplicationInfo.nativeLibraryDir logo no onCreate (ANTES de qualquer load
+ * de driver), tornando o cold start determinístico; o scan de maps segue só
+ * como rede de segurança.
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_com_deivid22srk_dk64recomp_MainActivity_nativeSetRuntimePaths(JNIEnv *env, jclass /*clazz*/,
+                                                                   jstring jFilesDir,
+                                                                   jstring jNativeLibDir) {
+    /*
+     * filesDir NÃO é lido aqui: no onCreate a SDLThread já pode estar rodando
+     * init_from_args() (que escreve internal/external a partir do argv do
+     * SDL) — escrever o mesmo global em paralelo seria uma corrida de dados,
+     * ainda que com valor idêntico. O filesDir do jogo chega pelo argv e o
+     * probe JNI continua passando o dele via set_runtime_paths (executado
+     * muito depois, sem concorrência). Aqui injetamos apenas o
+     * nativeLibraryDir — hookLibDir em contrato do libadrenotools — via
+     * set_native_library_dir, global que NENHUM outro caminho escreve.
+     */
+    const char *nld = jNativeLibDir ? env->GetStringUTFChars(jNativeLibDir, nullptr) : nullptr;
+    androidport::set_native_library_dir(nld);
+    if (nld) env->ReleaseStringUTFChars(jNativeLibDir, nld);
+}
+
 #else // !__ANDROID__
 
 void *dk64_adrenotools_get_instance_proc_addr(void) { return nullptr; }

@@ -1,11 +1,14 @@
 package com.deivid22srk.dk64recomp;
 
 import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.View;
@@ -70,6 +73,24 @@ public class MainActivity extends SDLActivity {
         AppSetup.ensureAssets(this);
 
         super.onCreate(savedInstanceState);
+
+        // Injeta o nativeLibraryDir no nativo O QUANTO ANTES (libmain.so já
+        // foi carregada por super.onCreate -> loadLibraries). Sem isto, o
+        // hookLibDir do adrenotools (ApplicationInfo.nativeLibraryDir — valor
+        // em contrato) dependia do FALLBACK de /proc/self/maps em TODO cold
+        // start: qualquer anomalia de mapeamento deixava o carregamento do
+        // driver Turnip quebrado na reabertura, embora o probe da instalação
+        // (que recebe o path do Java) funcionasse — o padrão "funciona ao
+        // instalar, perde ao fechar e reabrir". Deve rodar ANTES do primeiro
+        // load de driver (plume init na renderização da launcher, muito depois
+        // deste ponto). Vai para custom_driver.cpp (nativeSetRuntimePaths).
+        try {
+            nativeSetRuntimePaths(getFilesDir().getAbsolutePath(),
+                    getApplicationInfo().nativeLibraryDir);
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "nativeSetRuntimePaths indisponível: " + e.getMessage());
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             WindowManager.LayoutParams attrs = getWindow().getAttributes();
             // SHORT_EDGES: permite que o conteúdo se estenda pela área do
@@ -270,6 +291,13 @@ public class MainActivity extends SDLActivity {
         return true;
     }
 
+    /** Injeta o nativeLibraryDir no nativo cedo (implementado em custom_driver.cpp).
+     *  Garante o hookLibDir exato exigido pelo adrenotools em TODA sessão —
+     *  o scan de /proc/self/maps passa a ser apenas rede de segurança. O
+     *  filesDir segue vindo do argv do SDL (getArguments) — o 1º parâmetro é
+     *  mantido na assinatura por simetria e é ignorado no nativo. */
+    private static native void nativeSetRuntimePaths(String filesDir, String nativeLibraryDir);
+
     /** Registro da JavaVM para a ponte de arquivos (implementado em file_bridge.cpp). */
     private static native void nativeBridgeInit();
 
@@ -368,7 +396,7 @@ public class MainActivity extends SDLActivity {
      * O jogo sai pelo menu Exit -> ultramodern::quit() seta o ESTÁTICO
      * `exited` (librecomp/recomp.cpp) -> SDL_main retorna -> SDLThread chama
      * mSingleton.finish() (SDLActivity.java ~L1891). O SDLActivity encerra a
-     * própria thread e o SDL (nativeQuit -> SDL_Quit), mas o PROCESSO fica
+     * própria thread e o SDL (nativeQuit -> SDL_Quit), mas o PROCESSO ficava
      * vivo (apenas cacheado pelo sistema). Um 2º SDL_main no mesmo processo —
      * exatamente o que acontece ao sair do jogo e reabrir o app — nasce com
      * TODOS os estáticos do runtime sujos: `exited` ainda é true (o loop
@@ -379,20 +407,40 @@ public class MainActivity extends SDLActivity {
      * Encerrar o processo aqui torna CADA relaunch um processo novo:
      * estáticos zerados, driver recarregado do zero a partir de
      * files/driver/selected.txt, probe rerodado. É o comportamento padrão de
-     * ports SDL no Android (a Activity é destruída apenas em finish() do fim
-     * do jogo, back na raiz da task, ou swipe em recents — a orientação é
-     * fixa e configChanges cobre rotações/teclado, então isFinishing() aqui
-     * significa "fim de jogo", nunca recriação de configuração). É também o
-     * que torna a troca de driver via menu "GPU Driver" efetiva: Exit ->
-     * reabrir = driver novo.
+     * ports SDL no Android e é o que torna a troca de driver via menu
+     * "GPU Driver" efetiva: Exit -> reabrir = driver novo.
      */
     @Override
     public void onDestroy() {
         Log.i(TAG, "MainActivity.onDestroy (isFinishing=" + isFinishing() + ")");
+        /*
+         * ENCERRAR O PROCESSO EM TODOS OS CAMINHOS DE DESTRUIÇÃO (bug do
+         * driver "perdido" ao fechar/reabrir).
+         *
+         * A versão anterior matava o processo SOMENTE se isFinishing();
+         * destruições iniciadas PELO SISTEMA chegam com isFinishing()==false
+         * e sobreviviam: swipe do app em Recents (comportamento variável por
+         * OEM/versão), "Don't keep activities" (comum em quem testa
+         * emuladores), destruição por memória. O processo ficava cacheado com
+         * a SDL morta e TODOS os estáticos nativos sujos (estado do driver em
+         * custom_driver.cpp, tabela do volk já ligada ao driver anterior,
+         * contexto RT64/RmlUi do run anterior). Reabrir rodava um 2º
+         * SDL_main NESSE processo: o cache por fingerprint do ensure_loaded
+         * _locked curto-circuitava, o Vulkan já estava inicializado com o
+         * driver antigo e o driver novo (ou até o próprio driver) "sumia" —
+         * a mesma classe do bug já corrigido no Exit do jogo, com guarda
+         * fraca demais.
+         *
+         * killProcess ANTES do super.onDestroy: se o loop nativo não sair
+         * limpo, o join do SDLThread em super.onDestroy travaria a UI thread
+         * ANTES do kill chegar — mantendo o zumbi que gera o 2º SDL_main.
+         * Matando primeiro, TODO relaunch nasce limpo: estáticos zerados e o
+         * driver recarregado do zero a partir de files/driver/selected.txt
+         * (com probe). Não há recriação por mudança de configuração aqui:
+         * configChanges cobre orientação/uiMode/locale/densidade/etc.
+         */
+        android.os.Process.killProcess(android.os.Process.myPid());
         super.onDestroy();
-        if (isFinishing()) {
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
     }
 
     @Override
@@ -429,10 +477,19 @@ public class MainActivity extends SDLActivity {
 
     /**
      * Handler do pedido de reinício vindo do nativo (app_restart.cpp). Roda
-     * na thread de render do RT64 (o nativo dispara daqui). O SDL está
-     * bloqueado no loop de eventos do RT64, então finalizar a Activity direto
+     * na thread de reinício do nativo (anexada à JVM por AttachCurrentThread
+     * em native_request_app_restart — antes disso o pedido nem chegava aqui).
+     * O SDL está no loop de eventos do RT64, então finalizar a Activity direto
      * daqui é seguro: o super.onDestroy da SDLActivity para o SDL, e o
      * MainActivity.onDestroy mata o processo.
+     *
+     * A mensagem do nativo promete "The app will now restart": para cumprir,
+     * agenda um ALARME de +1.5s com o PendingIntent da launcher ANTES de
+     * finalizar — ele dispara DEPOIS que o onDestroy matar o processo,
+     * reabrindo o app em cold start com o driver novo. Best-effort: se o
+     * agendamento falhar (OEM sem alarme, etc.), o app apenas fecha e o
+     * usuário reabre manualmente — que agora também carrega o driver
+     * corretamente (kill incondicional no onDestroy).
      *
      * O nativo já exibiu a caixa de mensagem com o resultado do install/remove
      * antes de chamar isto (caixa modal do SDL, bloqueia a render thread até
@@ -447,6 +504,31 @@ public class MainActivity extends SDLActivity {
                     + "nada a fazer; o usuário precisa reabrir o app manualmente");
             return;
         }
+
+        // Agenda a REABERTURA automática antes de encerrar (sobrevive ao
+        // killProcess: o alarme é do sistema, não do processo).
+        try {
+            final Intent launch = activity.getPackageManager()
+                    .getLaunchIntentForPackage(activity.getPackageName());
+            final AlarmManager alarm =
+                    (AlarmManager) activity.getSystemService(Context.ALARM_SERVICE);
+            if (launch != null && alarm != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                final PendingIntent pi = PendingIntent.getActivity(activity, 0, launch,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                alarm.set(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + 1500L, pi);
+                Log.i(TAG, "handleNativeAppRestart: reabertura automática agendada (+1.5s)");
+            } else {
+                Log.w(TAG, "handleNativeAppRestart: reabertura automática indisponível "
+                        + "(launch intent/alarm manager nulos) — reabra manualmente");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "handleNativeAppRestart: falha ao agendar reabertura — "
+                    + "reabra manualmente", t);
+        }
+
         // Garante que o callback rode na UI thread (finish() precisa).
         activity.runOnUiThread(() -> {
             if (!activity.isFinishing()) {
