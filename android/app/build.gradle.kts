@@ -45,6 +45,31 @@ android {
         }
     }
 
+    signingConfigs {
+        // Assinatura de release usada no CI (release.yml): a keystore vem dos
+        // secrets do GitHub (ANDROID_RELEASE_KEYSTORE_B64 + senhas/alias) e é
+        // decodificada para um arquivo temporário. Em builds locais sem as env
+        // vars o config fica sem storeFile e o buildType release cai no
+        // fallback da debug keystore (APK continua instalável p/ testes).
+        create("ciRelease") {
+            val storeB64 = System.getenv("ANDROID_RELEASE_KEYSTORE_B64")
+            val storePass = System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")
+            val alias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
+            val keyPass = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+            if (!storeB64.isNullOrBlank() && !storePass.isNullOrBlank() &&
+                !alias.isNullOrBlank() && !keyPass.isNullOrBlank()
+            ) {
+                val tmp = File.createTempFile("release-keystore", ".jks")
+                tmp.writeBytes(Base64.getDecoder().decode(storeB64))
+                tmp.deleteOnExit()
+                storeFile = tmp
+                storePassword = storePass
+                keyAlias = alias
+                keyPassword = keyPass
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isJniDebuggable = true
@@ -52,8 +77,14 @@ android {
         }
         release {
             isMinifyEnabled = false
-            // v1 entrega APK debug; release assinado com debug p/ ser instalável
-            signingConfig = signingConfigs.getByName("debug")
+            // CI (release.yml): assina com a keystore de release dos secrets.
+            // Local (sem env vars): fallback p/ debug keystore.
+            signingConfig =
+                if (signingConfigs.getByName("ciRelease").storeFile != null) {
+                    signingConfigs.getByName("ciRelease")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 
