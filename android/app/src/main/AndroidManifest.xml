@@ -42,7 +42,15 @@
         android:allowBackup="true"
         android:largeHeap="true"
         android:hardwareAccelerated="true"
+        android:appCategory="game"
+        android:isGame="true"
         android:theme="@style/AppTheme">
+
+        <!-- Identificação como JOGO (pedido do usuário): launchers, stores e
+             o próprio sistema (Game Mode / DND automático) usam estes
+             atributos. isGame é o fallback que launchers antigos e a TV ainda
+             consultam; appCategory é o mecanismo atual (ambos desde a API 26,
+             nosso minSdk). -->
 
         <!-- Port Android do DK64: Recompiled — gamepad prioridade; touch para menus. -->
         <!-- Launcher ÚNICA: o app abre direto no SDL. Os assets são copiados no -->
@@ -60,7 +68,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Shortcut estático (long-press no ícone no launcher):
+                 "Logs e diagnóstico" -> DiagnosticsActivity. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Tela de diagnóstico (logs): aberta via shortcut do launcher ou
+             programaticamente. Não é exportada — só o app entra aqui. -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:label="@string/diagnostics_title"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|fontScale|keyboard|keyboardHidden|navigation" />
+
+        <!-- Provider mínimo (sem AndroidX) que serve SOMENTE os arquivos do
+             diretório de diagnóstico via content://, para o ACTION_SEND
+             (compartilhar log) funcionar no Android 7+ (que exige content://
+             em vez de file://). Exported=false + grantUriPermissions: o
+             acesso é concedido temporariamente pelo FLAG_GRANT_READ_URI_PERMISSION
+             do Intent de compartilhamento. -->
+        <provider
+            android:name=".DiagnosticsFilesProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 
 </manifest>

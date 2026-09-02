@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Shortcut estático (API 25+, nosso minSdk é 26): long-press no ícone do
+    app no launcher mostra "Logs de diagnóstico", que abre a
+    DiagnosticsActivity sem precisar passar pelo jogo.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="diagnostics"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/diag_shortcut_short"
+        android:shortcutLongLabel="@string/diag_shortcut_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.deivid22srk.dk64recomp"
+            android:targetClass="com.deivid22srk.dk64recomp.DiagnosticsActivity" />
+    </shortcut>
+</shortcuts>

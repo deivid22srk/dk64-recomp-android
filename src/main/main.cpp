@@ -787,6 +787,13 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     game_options_menu->add_option("GPU Driver", []() {
         show_android_gpu_driver_menu();
     });
+    // Port Android: "Configurações" do app — tela de logs de diagnóstico
+    // (captura crash-safe de áudio/render/driver/crashes + resumo de erros +
+    // compartilhar). A captura vem DESATIVADA por padrão e é ligada/desligada
+    // NA HORA dentro da tela. Fire-and-forget: nada volta ao menu.
+    game_options_menu->add_option("Logs de diagnóstico", []() {
+        androidport::filedialog::open_diagnostics_screen();
+    });
 #endif
     game_options_menu->set_width(30, recompui::Unit::Percent);
 

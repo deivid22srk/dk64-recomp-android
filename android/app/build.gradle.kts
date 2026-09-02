@@ -17,8 +17,8 @@ android {
         applicationId = "com.deivid22srk.dk64recomp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.1-android"
+        versionCode = 3
+        versionName = "1.0.3-android"
 
         ndk {
             // 64-bit apenas (decisão do usuário: memória e tempo de build)
@@ -47,6 +47,32 @@ android {
         }
     }
 
+    signingConfigs {
+        // Assinatura de release usada no CI (release.yml): o workflow decodifica
+        // a keystore (secret ANDROID_RELEASE_KEYSTORE_B64) para um arquivo e
+        // informa o CAMINHO via env ANDROID_RELEASE_KEYSTORE_FILE (+ senhas e
+        // alias). Em builds locais sem as env vars o config fica sem storeFile
+        // e o buildType release cai no fallback da debug keystore (APK segue
+        // instalável p/ testes).
+        // Obs.: a decodificação fica no shell do CI de propósito — no Kotlin DSL
+        // "java" em posição de expressão colide com o acessor da extensão `java`
+        // do Project (java.util.Base64 não resolve aqui).
+        create("ciRelease") {
+            val storePath = System.getenv("ANDROID_RELEASE_KEYSTORE_FILE")
+            val storePass = System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")
+            val alias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
+            val keyPass = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+            if (!storePath.isNullOrBlank() && !storePass.isNullOrBlank() &&
+                !alias.isNullOrBlank() && !keyPass.isNullOrBlank()
+            ) {
+                storeFile = file(storePath)
+                storePassword = storePass
+                keyAlias = alias
+                keyPassword = keyPass
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isJniDebuggable = true
@@ -54,8 +80,14 @@ android {
         }
         release {
             isMinifyEnabled = false
-            // v1 entrega APK debug; release assinado com debug p/ ser instalável
-            signingConfig = signingConfigs.getByName("debug")
+            // CI (release.yml): assina com a keystore de release dos secrets.
+            // Local (sem env vars): fallback p/ debug keystore.
+            signingConfig =
+                if (signingConfigs.getByName("ciRelease").storeFile != null) {
+                    signingConfigs.getByName("ciRelease")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 

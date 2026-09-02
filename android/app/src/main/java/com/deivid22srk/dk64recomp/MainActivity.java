@@ -5,6 +5,7 @@ import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -51,6 +52,27 @@ public class MainActivity extends SDLActivity {
     private VirtualPadView virtualPadView;
 
     // ------------------------------------------------------------------
+    // ORIENTAÇÃO — o jogo é LANDSCAPE-ONLY.
+    //
+    // O manifest trava em sensorLandscape, MAS o SDL sobrescreve isso em
+    // runtime: Android_CreateWindow chama via JNI SDLActivity.setOrientation
+    // (SDLActivity.setOrientationBis), que com a hint ORIENTATIONS vazia
+    // decide pela comparação w>h DA JANELA NO MOMENTO DO CREATE. Se o app é
+    // aberto com o aparelho na vertical (ou o sensor ainda está em transição
+    // quando a surface nasce), o Android entrega w<h e o SDL pede
+    // SCREEN_ORIENTATION_SENSOR_PORTRAIT — derrubando o lock do manifest.
+    // Era exatamente o "às vezes abre no modo Portrait".
+    //
+    // Override IGNORA w/h/hint e reafirma a paisagem dupla em TODA chamada.
+    // ------------------------------------------------------------------
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        Log.v(TAG, "setOrientation override: forçando SENSOR_LANDSCAPE "
+                + "(w=" + w + " h=" + h + " hint=" + hint + ")");
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
+
+    // ------------------------------------------------------------------
     // Ponte SAF <-> menu do jogo (file_bridge.cpp). Requisições chegam da
     // thread de render do RT64 (JNI -> requestFilePicker); resultados são
     // processados em background e publicados em nativeOnFilePicked.
@@ -73,6 +95,10 @@ public class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         Log.i(TAG, "MainActivity.onCreate -> preparando assets e iniciando fluxo SDL");
+        // Captura de diagnóstico (se ativada nas configurações) começa AQUI,
+        // antes de qualquer outra coisa, para registrar desde o copy de assets
+        // até o fim. Nunca derruba o app: qualquer falha é engolida e logada.
+        DiagnosticsLogger.onMainActivityCreate(this);
         // ANTES do super: super.onCreate inicia a SDLThread, que logo consome
         // filesDir/assets (fontes/texturas do recompui). A cópia é bloqueante
         // e marcada por .assets_version — nas execuções seguintes é um stat.
@@ -363,6 +389,34 @@ public class MainActivity extends SDLActivity {
         return true;
     }
 
+    /**
+     * Chamado via JNI pela thread de render (file_bridge.cpp) a partir da
+     * opção "Logs de diagnóstico" do menu launcher do jogo (Configurações do
+     * app). Abre a DiagnosticsActivity na MESMA task (voltar fecha a tela e
+     * retorna ao jogo) — o ciclo onPause/onResume que isso dispara já é
+     * coberto pelo congelamento da present queue (app_lifecycle), exatamente
+     * como no seletor SAF.
+     *
+     * Fire-and-forget: sem slot no nativo e sem resultado de volta — só
+     * posta o Intent e devolve. Falso = ponte indisponível (não bloqueia o
+     * menu; o usuário ainda tem o shortcut do long-press no ícone).
+     */
+    public static boolean openDiagnosticsScreen() {
+        final Activity activity = mSingleton;
+        if (activity == null || activity.isFinishing()) {
+            Log.e(TAG, "openDiagnosticsScreen: Activity indisponível");
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            try {
+                activity.startActivity(new Intent(activity, DiagnosticsActivity.class));
+            } catch (Exception e) {
+                Log.e(TAG, "Falha ao abrir a tela de diagnóstico", e);
+            }
+        });
+        return true;
+    }
+
     /** Injeta o nativeLibraryDir no nativo cedo (implementado em custom_driver.cpp).
      *  Garante o hookLibDir exato exigido pelo adrenotools em TODA sessão —
      *  o scan de /proc/self/maps passa a ser apenas rede de segurança. O
@@ -420,12 +474,19 @@ public class MainActivity extends SDLActivity {
     public void onPause() {
         // ANTES do super (que sinaliza a pausa do SDL): congela a present
         // thread o quanto antes — surfaceDestroyed chega logo depois.
+        DiagnosticsLogger.mark("onPause — app perdendo primeiro plano");
         try {
             nativeSetAppActive(false);
         } catch (UnsatisfiedLinkError e) {
             Log.e(TAG, "nativeSetAppActive(false) indisponível: " + e.getMessage());
         }
         super.onPause();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        DiagnosticsLogger.mark("onResume — app de volta ao primeiro plano");
     }
 
     @Override
@@ -485,6 +546,10 @@ public class MainActivity extends SDLActivity {
     @Override
     public void onDestroy() {
         Log.i(TAG, "MainActivity.onDestroy (isFinishing=" + isFinishing() + ")");
+        // Finaliza a sessão de diagnóstico ANTES do killProcess: escreve o
+        // bloco de RESUMO (erros/avisos agrupados) e fecha o arquivo. Depois
+        // disto nada mais é capturado — o processo morre logo abaixo.
+        DiagnosticsLogger.onMainActivityDestroy();
         /*
          * ENCERRAR O PROCESSO EM TODOS OS CAMINHOS DE DESTRUIÇÃO (bug do
          * driver "perdido" ao fechar/reabrir).
