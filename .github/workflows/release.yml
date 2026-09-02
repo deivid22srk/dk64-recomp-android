@@ -1,0 +1,264 @@
+name: release
+
+# Build do APK Android em modo RELEASE, assinado com a keystore de release
+# (secrets: ANDROID_RELEASE_KEYSTORE_B64 / _PASSWORD / _KEY_ALIAS / _KEY_PASSWORD),
+# publicado como GitHub Release com o APK anexado.
+#
+# Baseado no build.yml (mesma cadeia: codegen no host com a ROM do release
+# `build-inputs` do repo privado via secret PRIVATE_REPO_TOKEN -> Gradle + NDK).
+#
+# Disparo: manual (workflow_dispatch), opcionalmente com a tag do release.
+# Se `release_tag` ficar vazio, a tag é gerada automaticamente como
+# v<versionName>-r<run_number>.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag do release (vazio = auto: v<versionName>-r<run_number>)'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Marcar como pre-release?'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Init submódulos necessários (vcpkg não é usado no build Android)
+        run: |
+          set -euo pipefail
+          git submodule update --init --recursive --depth 1 \
+            lib/rt64 lib/N64ModernRuntime lib/RecompFrontend lib/dk64_decomp lib/adrenotools
+          git submodule status
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Dependências do host (ninja/clang/lld)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang lld llvm
+          clang --version | head -1
+          ld.lld --version
+
+      - name: Baixar ROM de input (release asset em repo privado) e validar
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::Secret PRIVATE_REPO_TOKEN ausente — crie um PAT com acesso de leitura ao repo privado de inputs e defina o secret (ver scripts/setup-build-inputs-repo.sh)."
+            exit 1
+          fi
+          mkdir -p rom-input
+          gh release download build-inputs --repo deivid22srk/dk64-recomp-build-inputs \
+            --pattern 'Donkey.Kong.64.zip' --output rom-input/Donkey.Kong.64.zip --clobber
+          cd rom-input
+          unzip -o Donkey.Kong.64.zip
+          ROMS=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | wc -l)
+          if [ "$ROMS" -ne 1 ]; then
+            echo "::error::Esperava exatamente 1 ROM no zip, achei $ROMS"
+            exit 1
+          fi
+          ROM_FILE=$(find . -maxdepth 2 -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' | head -1)
+          SHA1=$(sha1sum "$ROM_FILE" | cut -d' ' -f1)
+          echo "ROM sha1: $SHA1"
+          if [ "$SHA1" != "cf806ff2603640a748fca5026ded28802f1f4a50" ]; then
+            echo "::error::ROM incorreta (esperado NTSC-U 1.0, sha1 cf806ff2...)"
+            exit 1
+          fi
+
+      - name: Build N64Recomp & RSPRecomp (host)
+        run: |
+          set -euo pipefail
+          git clone https://github.com/N64Recomp/N64Recomp.git --recurse-submodules N64RecompSource
+          cd N64RecompSource
+          git checkout 2b6f05688de2abc7d86da5b4a89b84c2c6acbabe
+          git submodule update --init --recursive
+          cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build
+          cmake --build cmake-build --target N64RecompCLI RSPRecomp -j $(nproc)
+          cp cmake-build/N64Recomp cmake-build/RSPRecomp ..
+
+      - name: Descomprimir a ROM (script do dk64_decomp)
+        run: |
+          set -euo pipefail
+          mkdir -p rom-work
+          cp rom-input/*.z64 rom-work/baserom.us.z64
+          ( cd rom-work && python3 ../lib/dk64_decomp/tools/generate_decompressed_rom.py )
+          cp rom-work/baserom.us.decompressed.z64 donkeykong64.decompressed.us.z64
+          ls -la donkeykong64.decompressed.us.z64
+
+      - name: Codegen (N64Recomp us.toml + RSPRecomp + patches)
+        run: |
+          set -euo pipefail
+          ./N64Recomp us.toml
+          ./RSPRecomp n_aspMain.toml
+          make -C patches CC=clang LD=ld.lld
+          ./N64Recomp patches.toml
+          ls RecompiledFuncs | head -3
+          ls RecompiledPatches
+          ls rsp/n_aspMain.cpp
+
+      - name: Build file_to_c (host tool)
+        run: |
+          set -euo pipefail
+          cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S lib/rt64/src/tools/file_to_c -B build-filetoc
+          cmake --build build-filetoc -j $(nproc)
+          ./build-filetoc/file_to_c --help >/dev/null 2>&1 || true
+
+      - name: Aplicar patches de port nos submódulos
+        run: |
+          set -euo pipefail
+          git -C lib/rt64 apply --verbose ../../android/patches/rt64-android.patch
+          git -C lib/rt64/src/contrib/plume apply --verbose ../../../../../android/patches/plume-android.patch
+          git -C lib/rt64/src/contrib/zstd apply --verbose ../../../../../android/patches/zstd-android.patch
+          git -C lib/RecompFrontend apply --verbose ../../android/patches/recompfrontend-android.patch
+
+      - name: Verificar secret da keystore de release
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}" ]; then
+            echo "::error::Secret ANDROID_RELEASE_KEYSTORE_B64 ausente — configure os secrets de assinatura (keystore .jks em base64 + senhas + alias)."
+            exit 1
+          fi
+
+      - name: Build APK release assinado (Gradle + NDK)
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            -PHOST_FILE_TO_C="$GITHUB_WORKSPACE/build-filetoc/file_to_c"
+
+      - name: Verificar conteúdo do APK (hooks do adrenotools empacotados)
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$APK" ]; then
+            echo "::error::$APK não existe — assembleRelease não gerou o APK assinado"
+            ls -la android/app/build/outputs/apk/release/ || true
+            exit 1
+          fi
+          unzip -l "$APK" > /tmp/apk-list.txt
+          cat /tmp/apk-list.txt
+          for lib in libmain.so libmain_hook.so libhook_impl.so libfile_redirect_hook.so; do
+            if ! grep -q "lib/arm64-v8a/$lib" /tmp/apk-list.txt; then
+              echo "::error::$lib ausente do APK — hooks do adrenotools não foram empacotados"
+              exit 1
+            fi
+          done
+          echo "APK OK: libmain.so + hooks do adrenotools presentes"
+
+      - name: Verificar assinatura do APK (apksigner)
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "Usando $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK"
+          echo "---"
+          "$APKSIGNER" verify --print-certs "$APK" | tee /tmp/certs.txt
+          grep -q "CN=DK64 Recompiled Android" /tmp/certs.txt || {
+            echo "::error::APK não está assinado com a keystore de release (CN=DK64 Recompiled Android)"
+            exit 1
+          }
+          echo "Assinatura de release OK"
+
+      - name: Definir tag e nome do release
+        id: relmeta
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' android/app/build.gradle.kts | head -1)
+          INPUT_TAG="${{ github.event.inputs.release_tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="v${VERSION}-r${{ github.run_number }}"
+          fi
+          APK_STEM="dk64recomp-android-${TAG}"
+          echo "tag=${TAG}"       >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "apk_stem=${APK_STEM}" >> "$GITHUB_OUTPUT"
+          echo "Release: tag=$TAG version=$VERSION"
+
+      - name: Copiar APK com nome de release
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          cp "$APK" "android/app/build/outputs/apk/release/${{ steps.relmeta.outputs.apk_stem }}.apk"
+          ls -la android/app/build/outputs/apk/release/
+
+      - name: Upload do APK release (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dk64recomp-android-release
+          path: android/app/build/outputs/apk/release/${{ steps.relmeta.outputs.apk_stem }}.apk
+          if-no-files-found: error
+
+      - name: Criar GitHub Release com o APK assinado
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.relmeta.outputs.tag }}"
+          APK="android/app/build/outputs/apk/release/${{ steps.relmeta.outputs.apk_stem }}.apk"
+          SHA256=$(sha256sum "$APK" | cut -d' ' -f1)
+          SHA256_SHORT="${SHA256:0:16}"
+          PRE_FLAG=""
+          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            PRE_FLAG="--prerelease"
+          fi
+          # Se a tag já existir de um run anterior, recria apontando p/ este commit
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG já existe — removendo para recriar"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          fi
+          {
+            echo "## DK64 Recompiled — APK Android ${{ steps.relmeta.outputs.version }}"
+            echo ""
+            echo "APK **release assinado** (arm64-v8a), compilado pelo workflow \`${GITHUB_WORKFLOW}\` no commit \`${GITHUB_SHA::7}\` (\`${GITHUB_REF_NAME}\`)."
+            echo ""
+            echo "### Instalação"
+            echo "1. Baixe o arquivo \`${{ steps.relmeta.outputs.apk_stem }}.apk\` abaixo."
+            echo "2. No Android, permita \"instalar apps de fontes desconhecidas\" para o seu navegador/gerenciador de arquivos."
+            echo "3. Instale o APK. Não é preciso desinstalar builds anteriores assinados com esta mesma chave."
+            echo ""
+            echo "### Assinatura"
+            echo "- Keystore: CN=DK64 Recompiled Android (release)"
+            echo "- SHA-256 do APK: \`${SHA256_SHORT}…\`"
+            echo ""
+            echo "### Requisitos"
+            echo "- Android 8.0+ (API 26), arm64-v8a"
+            echo "- ROM do Donkey Kong 64 (NTSC-U 1.0) — selecione no app na primeira execução"
+          } > /tmp/release-notes.md
+          gh release create "$TAG" "$APK#${{ steps.relmeta.outputs.apk_stem }}.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "DK64 Recompiled Android ${{ steps.relmeta.outputs.version }} (${TAG})" \
+            --notes-file /tmp/release-notes.md \
+            $PRE_FLAG
+          echo "Release $TAG criado com o APK assinado"
