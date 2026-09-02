@@ -46,23 +46,24 @@ android {
     }
 
     signingConfigs {
-        // Assinatura de release usada no CI (release.yml): a keystore vem dos
-        // secrets do GitHub (ANDROID_RELEASE_KEYSTORE_B64 + senhas/alias) e é
-        // decodificada para um arquivo temporário. Em builds locais sem as env
-        // vars o config fica sem storeFile e o buildType release cai no
-        // fallback da debug keystore (APK continua instalável p/ testes).
+        // Assinatura de release usada no CI (release.yml): o workflow decodifica
+        // a keystore (secret ANDROID_RELEASE_KEYSTORE_B64) para um arquivo e
+        // informa o CAMINHO via env ANDROID_RELEASE_KEYSTORE_FILE (+ senhas e
+        // alias). Em builds locais sem as env vars o config fica sem storeFile
+        // e o buildType release cai no fallback da debug keystore (APK segue
+        // instalável p/ testes).
+        // Obs.: a decodificação fica no shell do CI de propósito — no Kotlin DSL
+        // "java" em posição de expressão colide com o acessor da extensão `java`
+        // do Project (java.util.Base64 não resolve aqui).
         create("ciRelease") {
-            val storeB64 = System.getenv("ANDROID_RELEASE_KEYSTORE_B64")
+            val storePath = System.getenv("ANDROID_RELEASE_KEYSTORE_FILE")
             val storePass = System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")
             val alias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
             val keyPass = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
-            if (!storeB64.isNullOrBlank() && !storePass.isNullOrBlank() &&
+            if (!storePath.isNullOrBlank() && !storePass.isNullOrBlank() &&
                 !alias.isNullOrBlank() && !keyPass.isNullOrBlank()
             ) {
-                val tmp = File.createTempFile("release-keystore", ".jks")
-                tmp.writeBytes(java.util.Base64.getDecoder().decode(storeB64))
-                tmp.deleteOnExit()
-                storeFile = tmp
+                storeFile = file(storePath)
                 storePassword = storePass
                 keyAlias = alias
                 keyPassword = keyPass

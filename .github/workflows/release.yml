@@ -150,6 +150,16 @@ jobs:
           ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # Decodifica a keystore para arquivo e valida store/alias com keytool.
+          # (A decodificação fica aqui de propósito: no Kotlin DSL, "java" em
+          # posição de expressão colide com o acessor da extensão `java` do
+          # Project e java.util.Base64 não resolve dentro do build.gradle.kts.)
+          KS="$RUNNER_TEMP/release.keystore"
+          echo "$ANDROID_RELEASE_KEYSTORE_B64" | base64 -d > "$KS"
+          keytool -list -keystore "$KS" \
+            -storepass "$ANDROID_RELEASE_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_RELEASE_KEY_ALIAS" > /dev/null
+          export ANDROID_RELEASE_KEYSTORE_FILE="$KS"
           cd android
           ./gradlew assembleRelease --no-daemon --stacktrace \
             -PHOST_FILE_TO_C="$GITHUB_WORKSPACE/build-filetoc/file_to_c"
