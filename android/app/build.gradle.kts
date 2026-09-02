@@ -60,7 +60,7 @@ android {
                 !alias.isNullOrBlank() && !keyPass.isNullOrBlank()
             ) {
                 val tmp = File.createTempFile("release-keystore", ".jks")
-                tmp.writeBytes(Base64.getDecoder().decode(storeB64))
+                tmp.writeBytes(java.util.Base64.getDecoder().decode(storeB64))
                 tmp.deleteOnExit()
                 storeFile = tmp
                 storePassword = storePass
