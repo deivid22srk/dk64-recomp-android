@@ -3,46 +3,106 @@ package com.deivid22srk.dk64recomp
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.CornerPathEffect
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RadialGradient
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
+import android.os.Build
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
+// ---------------------------------------------------------------------------
+// Tuning do gamepad v2 — linguagem visual "dark glass + identidade N64".
+// Valores em frações/`unit`, onde unit = min(alt/720, larg/1280) da área útil
+// (área útil = tela − display cutout − margem), referência paisagem 1280x720.
+// ---------------------------------------------------------------------------
+private const val STICK_DEADZONE = 0.08f      // zona morta radial (com reescala)
+private const val HIT_SCALE = 1.45f           // hit dos botões redondos (× raio)
+private const val MIN_HIT_UNIT = 48f          // hit mínimo (× unit) — alvo de toque ≥ 48dp
+private const val EXIT_HYSTERESIS = 1.75f     // solta o botão só além de hit × 1.75
+private const val STICK_HIT_SCALE = 1.35f     // hit do stick (× raio externo)
+private const val PRESS_IN_MS = 90f           // animação de pressionar
+private const val PRESS_OUT_MS = 140f         // animação de soltar
+private const val HUD_FADE_MS = 200f          // fade do HUD ao mostrar/esconder
+private const val KNOB_RETURN_TAU = 60f       // constante de tempo do retorno do knob
+private const val DPAD_MIN_RADIUS = 0.9f      // raio mínimo (× braço) p/ direção
+private const val DPAD_ANGLE_HYST_RAD = 0.21f // histerese angular do D-pad (~12°)
+
+// Paleta base do vidro (RGB puro; o alpha é aplicado por paint e escalado pelo
+// fade do HUD — nada de alpha "assado" na cor, evita dupla transformação).
+private const val GLASS_RGB = 0x0A0D12
+private const val GLASS_ALPHA = 140           // base do vidro (55%)
+private const val HILITE_TOP = 0x26FFFFFF.toInt() // topo do gradiente (15%)
+private const val HILITE_BOT = 0x08FFFFFF.toInt() // base do gradiente (3%)
+private const val SHADOW_COLOR = 0x59000000   // sombra suave (35%)
+private const val BORDER_ALPHA = 110          // contorno idle (43%) — legível em cenas claras
+private const val LABEL_ALPHA = 217           // label idle (85%)
+
+// Accent do projeto (verde-banana DK64) para controles neutros pressionados.
+private const val ACCENT = 0xFF9BD32B.toInt()
+
+// Identidade N64 (hardware real): A azul, B VERDE, C amarelo, START vermelho.
+// Tinta sutil no idle (borda/label) e glow no pressionado.
+private const val TINT_A = 0xFF7FB2E5.toInt()
+private const val TINT_B = 0xFF63C46B.toInt()
+private const val TINT_C = 0xFFF6DC7A.toInt()
+private const val TINT_START = 0xFFF2707F.toInt()
+private const val TINT_NEUTRAL = 0xFFE8ECEF.toInt()
+
+// Stops dos gradientes cacheados (RadialGradient/LinearGradient).
+private val TWO_STOPS = floatArrayOf(0f, 1f)
+private val SHADOW_STOPS = floatArrayOf(0.5f, 1f)
+private val GLOW_STOPS = floatArrayOf(0.5f, 0.86f, 1f)
+
 /**
- * Gamepad virtual do port Android do DK64: Recompiled.
+ * Gamepad virtual do port Android do DK64: Recompiled — v2 "dark glass".
  *
- * Overlay transparente desenhado inteiramente em [Canvas], herdando a
- * linguagem visual do projeto N64Pad2 (mesmo autor): traço cinza-claro,
- * realce verde nos controles pressionados, setas de 8 direções no analógico,
- * vibração leve e multi-touch real — mas com o HUD posicionado no estilo do
- * Dolphin (gatilhos nas quinas superiores, analógico à esquerda, cluster de
- * ações à direita, D-pad e Start na base), com transparência sobre o jogo
- * para não esconder a ação.
+ * Overlay transparente desenhado inteiramente em [Canvas] sobre o SDLSurface.
+ * Linguagem visual: vidro escuro translúcido (gradiente + sombra suave via
+ * gradiente radial, sem BlurMaskFilter/setShadowLayer por compatibilidade de
+ * HW), contorno fino, labels na fonte do jogo (InterVariable) e feedback de
+ * pressionado com escala (o controle "afunda") + glow na cor de identidade
+ * N64 (A azul, B verde, C amarelo, START vermelho; neutros usam o accent
+ * verde DK64). O HUD entra/sai com fade+deslize e aparece sozinho quando o
+ * jogo inicia (a escolha de esconder é persistida em SharedPreferences).
  *
- * Integração nativa:
- *  - Cada toque é repassado para `android/native/compat/virtual_pad.cpp`
- *    (JNI), que mantém o estado usado pelo runtime do jogo e espelha os
- *    eventos para as interfaces (launcher/menu do port) como eventos SDL.
- *  - O pad aparece sozinho quando o jogo inicia (callback [onGameStarted],
- *    chamado pela thread nativa) e pode ser escondido/mostrado pelo botão
- *    da quina inferior direita.
+ * Ergonomia: hit-areas generosas com prioridade por proximidade, histerese de
+ * saída (deslizar o dedo para fora solta o botão, mata "ghost press"), D-pad
+ * de 8 direções com histerese angular, stick com zona morta reescalada e
+ * retorno animado do knob, haptics diferenciados (press × mudança de direção)
+ * e [requestUnbufferedDispatch] para menor latência de toque.
  *
- * Layout (frações da tela, referência paisagem):
- *  - Topo:        L (esq) · Z (centro) · R (dir)
- *  - Esquerda:    analógico (y ~60%)
- *  - Base:        D-pad (~27%, 80%) · START (~47%, 88%) · MENU ☰ (~57%, 88%)
- *  - Direita:     losango de C (~73%, 33%) · A (~87%, 57%) · B (~73%, 70%)
- *  - Quina inf. dir.: botão de mostrar/esconder o HUD
+ * Integração nativa (CONTRATO — não mudar nomes/ids):
+ *  - `nativeInit/nativeButton/nativeAxis/nativeIsGameStarted` vinculam por
+ *    nome de classe em `android/native/compat/virtual_pad.cpp`, que mantém o
+ *    estado lido pelo runtime do jogo e espelha eventos SDL para as UIs.
+ *  - [onGameStarted] é chamado PELA THREAD NATIVA em transições jogo↔launcher;
+ *    o estado também é reconsultado no init ([nativeIsGameStarted]) para o pad
+ *    reaparecer corretamente se a Activity for recriada com o jogo rodando.
+ *  - Toques que não acertam controle nenhum retornam `false` e caem no SDL
+ *    (touch-as-mouse dos menus), inclusive no launcher (overlay pass-through).
+ *
+ * Layout (frações da ÁREA ÚTIL, referência paisagem):
+ *  - Topo:      Z (esq, pose do indicador esquerdo do N64) · L (centro) · R (dir)
+ *  - Esquerda:  analógico (12%, 63%)
+ *  - Base:      D-pad (28%, 82%) · START (47.5%, 87%)
+ *  - Direita:   losango C (76%, 42%) · A (88%, 58%) · B (79%, 72%) · MENU (65.5%, 88%)
+ *  - Quina inf. dir.: botão de mostrar/esconder o HUD (94%, 89%)
  */
 class VirtualPadView @JvmOverloads constructor(
     context: Context,
@@ -70,12 +130,9 @@ class VirtualPadView @JvmOverloads constructor(
         const val BTN_DPAD_RIGHT = 13
         const val BTN_MENU = 14 // abre/fecha o menu do port (não chega ao jogo)
 
-        // Zona morta radial do analógico (evita "andar sozinho" com o dedo parado).
-        const val STICK_DEADZONE = 0.06f
-
-        // Alpha dos controles sobre o jogo (estilo Dolphin).
-        const val ALPHA_IDLE = 0.58f
-        const val ALPHA_PRESSED = 0.97f
+        // Persistência da escolha do usuário (HUD visível ou não).
+        private const val PREFS_NAME = "virtual_pad"
+        private const val PREF_HUD_VISIBLE = "hud_visible"
 
         @Volatile
         private var instance: VirtualPadView? = null
@@ -87,142 +144,237 @@ class VirtualPadView @JvmOverloads constructor(
          */
         @JvmStatic
         fun onGameStarted(started: Boolean) {
-            instance?.post {
-                instance?.handleGameStarted(started)
-            }
+            val view = instance
+            view?.post { view.handleGameStarted(started) }
         }
     }
 
-    // ---------------------------------------------------------------- cores
-    // Mesma paleta do N64Pad2 (identidade visual do autor), com alpha próprio
-    // de overlay.
-    private val colOutline = Color.parseColor("#C8C8C8")
-    private val colOutlineDim = Color.parseColor("#8A8F8C")
-    private val colAccent = Color.parseColor("#9BD32B") // verde: controla pressionado
-    private val colHalo = Color.parseColor("#000000")   // halo escuro sob cada controle
-
-    private val colA64 = Color.parseColor("#5C87B0")    // A: azul-acinzentado
-    private val outA64 = Color.parseColor("#B3D9F7")
-    private val colB64 = Color.parseColor("#3053C4")    // B: azul escuro
-    private val outB64 = Color.parseColor("#8FA8F5")
-    private val colC = Color.parseColor("#D1A312")      // C: amarelo
-    private val outC = Color.parseColor("#F6DC7A")
-    private val colStart = Color.parseColor("#B01B2E")  // START: vermelho
-    private val outStart = Color.parseColor("#F2707F")
-    private val colMenu = Color.parseColor("#2B2B2B")   // MENU: grafite
-    private val outMenu = Color.parseColor("#BFBFBF")
-
-    // ---------------------------------------------------------------- paints
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-    }
-
     // ---------------------------------------------------------------- modelo
-    private class RoundBtn(val id: Int, val label: String, val fill: Int, val outline: Int) {
+    /** Controle redondo (A, B, C×4, START, MENU). */
+    private class RoundControl(
+        val id: Int,
+        val label: String,
+        val tintIdle: Int,
+        val tintPress: Int,
+        val labelScale: Float = 0.85f,
+        val drawArrow: Boolean = false,
+        val arrowAngleDeg: Float = 0f
+    ) {
         var cx = 0f
         var cy = 0f
         var r = 0f
+        var hitR = 0f
         var pointerId = -1
+        var press = 0f // animação de press 0..1 (linear; easing aplicado no draw)
+        var glass: Shader? = null
+        var shadow: Shader? = null
+        var glow: Shader? = null
         val pressed: Boolean get() = pointerId != -1
 
+        fun layout(cx: Float, cy: Float, r: Float, unit: Float) {
+            this.cx = cx
+            this.cy = cy
+            this.r = r
+            hitR = max(r * HIT_SCALE, MIN_HIT_UNIT * unit)
+        }
+
         fun hit(x: Float, y: Float): Boolean {
-            val rr = r * 1.35f
+            val dx = x - cx
+            val dy = y - cy
+            return dx * dx + dy * dy <= hitR * hitR
+        }
+
+        /** true quando o dedo deslizou além da zona de histerese (soltar). */
+        fun exitZone(x: Float, y: Float): Boolean {
+            val rr = hitR * EXIT_HYSTERESIS
+            val dx = x - cx
+            val dy = y - cy
+            return dx * dx + dy * dy > rr * rr
+        }
+    }
+
+    /** Gatilho em pílula (L, Z, R) no topo da tela. */
+    private class PillControl(
+        val id: Int,
+        val label: String,
+        val tintIdle: Int,
+        val tintPress: Int
+    ) {
+        val rect = RectF()
+        val hitRect = RectF()
+        val exitRect = RectF()
+        var pointerId = -1
+        var press = 0f
+        var glass: Shader? = null
+        var shadow: Shader? = null
+        var shadowRect = RectF()
+        val pressed: Boolean get() = pointerId != -1
+        val radius: Float get() = rect.height() / 2f
+
+        fun layout(l: Float, t: Float, r: Float, b: Float) {
+            rect.set(l, t, r, b)
+            val m = rect.height() * 0.18f
+            hitRect.set(rect)
+            hitRect.inset(-m, -m)
+            exitRect.set(rect)
+            exitRect.inset(-m * EXIT_HYSTERESIS, -m * EXIT_HYSTERESIS)
+            shadowRect.set(rect)
+            shadowRect.inset(-rect.height() * 0.14f, -rect.height() * 0.14f)
+        }
+
+        fun hit(x: Float, y: Float): Boolean = hitRect.contains(x, y)
+
+        fun exitZone(x: Float, y: Float): Boolean = !exitRect.contains(x, y)
+    }
+
+    /** Analógico virtual (anel + knob que segue o dedo). */
+    private class StickControl {
+        var cx = 0f
+        var cy = 0f
+        var outerR = 0f
+        var knobR = 0f
+        var dx = 0f // vetor bruto do dedo, -1..1 (espaço de tela)
+        var dy = 0f
+        var sentX = 0f // último eixo efetivamente enviado ao nativo (dedup)
+        var sentY = 0f
+        var kx = 0f // knob renderizado (suavizado), -1..1
+        var ky = 0f
+        var pointerId = -1
+        var press = 0f
+        var glass: Shader? = null
+        var shadow: Shader? = null
+        var glow: Shader? = null
+        var knobGrad: Shader? = null
+        val active: Boolean get() = pointerId != -1
+        val travel: Float get() = (outerR - knobR) * 0.92f
+
+        fun layout(cx: Float, cy: Float, outerR: Float, knobR: Float) {
+            this.cx = cx
+            this.cy = cy
+            this.outerR = outerR
+            this.knobR = knobR
+        }
+
+        fun hit(x: Float, y: Float): Boolean {
+            val rr = outerR * STICK_HIT_SCALE
             val dx = x - cx
             val dy = y - cy
             return dx * dx + dy * dy <= rr * rr
         }
     }
 
-    private class ShoulderBtn(val id: Int, val label: String) {
-        val rect = RectF()
-        var radius = 0f
-        var pointerId = -1
-        val pressed: Boolean get() = pointerId != -1
-
-        fun hit(x: Float, y: Float): Boolean {
-            val pad = rect.height() * 0.18f
-            return x >= rect.left - pad && x <= rect.right + pad &&
-                y >= rect.top - pad && y <= rect.bottom + pad
-        }
-    }
-
-    private class Stick {
+    /** D-pad: cruz de 8 direções com histerese angular. */
+    private class DPadControl {
         var cx = 0f
         var cy = 0f
-        var outerR = 0f
-        var knobR = 0f
-        var dx = 0f // -1..1 (espaço de tela)
-        var dy = 0f
+        var size = 0f     // meia extensão total
+        var arm = 0f      // meia largura do braço
         var pointerId = -1
-        val active: Boolean get() = pointerId != -1
-
-        fun hit(x: Float, y: Float): Boolean {
-            val rr = outerR * 1.25f
-            val ddx = x - cx
-            val ddy = y - cy
-            return ddx * ddx + ddy * ddy <= rr * rr
-        }
-    }
-
-    private class DPad {
-        var cx = 0f
-        var cy = 0f
-        var size = 0f      // meia largura do braço externo
-        var armWidth = 0f  // meia largura do braço interno
-        var pointerId = -1
+        var press = 0f
         var up = false
         var down = false
         var left = false
         var right = false
+        var hasAngle = false
+        var lastAng = 0f
+        var crossPath: Path? = null
+        var shadowPath: Path? = null
+        var glass: Shader? = null
+        var shadow: Shader? = null
         val pressed: Boolean get() = pointerId != -1
+        val anyDir: Boolean get() = up || down || left || right
 
-        fun hit(x: Float, y: Float): Boolean {
-            val dx = abs(x - cx)
-            val dy = abs(y - cy)
-            return (dx <= size && dy <= armWidth * 1.4f) || (dy <= size && dx <= armWidth * 1.4f) ||
-                (dx <= size * 0.85f && dy <= size * 0.85f)
+        fun layout(cx: Float, cy: Float, size: Float, arm: Float) {
+            this.cx = cx
+            this.cy = cy
+            this.size = size
+            this.arm = arm
         }
 
-        fun clear() {
-            up = false; down = false; left = false; right = false
+        fun hit(x: Float, y: Float): Boolean = contains(x, y, size * 0.15f)
+
+        /** true quando o dedo deslizou além da zona de histerese (soltar). */
+        fun exitZone(x: Float, y: Float): Boolean = !contains(x, y, size * 0.15f * EXIT_HYSTERESIS)
+
+        private fun contains(x: Float, y: Float, m: Float): Boolean {
+            val dx = abs(x - cx)
+            val dy = abs(y - cy)
+            return (dx <= arm + m && dy <= size + m) || (dy <= arm + m && dx <= size + m)
         }
     }
 
-    private val btnA = RoundBtn(BTN_A, "A", colA64, outA64)
-    private val btnB = RoundBtn(BTN_B, "B", colB64, outB64)
-    private val btnCU = RoundBtn(BTN_C_UP, "C", colC, outC)
-    private val btnCD = RoundBtn(BTN_C_DOWN, "C", colC, outC)
-    private val btnCL = RoundBtn(BTN_C_LEFT, "C", colC, outC)
-    private val btnCR = RoundBtn(BTN_C_RIGHT, "C", colC, outC)
-    private val btnStart = RoundBtn(BTN_START, "START", colStart, outStart)
-    private val btnMenu = RoundBtn(BTN_MENU, "", colMenu, outMenu) // ícone ☰ desenhado
+    private val btnA = RoundControl(BTN_A, "A", TINT_A, TINT_A)
+    private val btnB = RoundControl(BTN_B, "B", TINT_B, TINT_B)
+    private val btnCU = RoundControl(BTN_C_UP, "", TINT_C, TINT_C, drawArrow = true, arrowAngleDeg = -90f)
+    private val btnCD = RoundControl(BTN_C_DOWN, "", TINT_C, TINT_C, drawArrow = true, arrowAngleDeg = 90f)
+    private val btnCL = RoundControl(BTN_C_LEFT, "", TINT_C, TINT_C, drawArrow = true, arrowAngleDeg = 180f)
+    private val btnCR = RoundControl(BTN_C_RIGHT, "", TINT_C, TINT_C, drawArrow = true, arrowAngleDeg = 0f)
+    private val btnStart = RoundControl(BTN_START, "START", TINT_START, TINT_START, labelScale = 0.55f)
+    private val btnMenu = RoundControl(BTN_MENU, "", TINT_NEUTRAL, ACCENT)
+    private val roundButtons: Array<RoundControl> =
+        arrayOf(btnA, btnB, btnCU, btnCD, btnCL, btnCR, btnStart, btnMenu)
 
-    private val cButtons = listOf(btnCU, btnCD, btnCL, btnCR)
-    private val faceButtons = listOf(btnA, btnB, btnStart, btnMenu) + cButtons
+    private val pillL = PillControl(BTN_L, "L", TINT_NEUTRAL, ACCENT)
+    private val pillR = PillControl(BTN_R, "R", TINT_NEUTRAL, ACCENT)
+    private val pillZ = PillControl(BTN_Z, "Z", TINT_NEUTRAL, ACCENT)
+    // Arrays (não List): iteração sem alocar Iterator no hot path de draw/touch.
+    private val pills: Array<PillControl> = arrayOf(pillL, pillZ, pillR)
 
-    private val lt = ShoulderBtn(BTN_L, "L")
-    private val rt = ShoulderBtn(BTN_R, "R")
-    private val zt = ShoulderBtn(BTN_Z, "Z")
-    private val shoulders = listOf(lt, rt, zt)
+    private val stick = StickControl()
+    private val dpad = DPadControl()
 
-    private val leftStick = Stick()
-    private val dpad = DPad()
+    // ---------------------------------------------------------------- paints
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+    }
 
-    // botão de mostrar/esconder o HUD (quina inferior direita)
-    private val toggleRect = RectF()
+    /** Fonte dos labels: a mesma do jogo (assets do APK), com fallback seguro. */
+    private val labelFont: Typeface = run {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                Typeface.Builder(context.assets, "InterVariable.ttf").setWeight(700).build()
+            } else {
+                Typeface.createFromAsset(context.assets, "InterVariable.ttf")
+            }
+        }.getOrNull() ?: Typeface.create("sans-serif", Typeface.BOLD)
+    }
+
+    // ---------------------------------------------------------------- estado
+    // Preferência do usuário (HUD visível) sobrevive à recriação da Activity.
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private var unit = 1f
-    private var padVisible = false
     private var gameStarted = false
+    private var padVisible = false
+    private var hudAlpha = 0f          // fade do HUD (0..1)
+    private var toggleFlash = 0f       // flash de ativação do botão de toggle
+    private var togglePointerId = -1   // toggle aguarda o UP (cancelável)
+    private var togglePress = 0f       // animação de press do toggle
+    private var lastFrame = 0L
+
+    // Haptic de setor do stick (com cooldown contra rajadas).
+    private var lastStickTick = -1
+    private var lastTickHapticAt = 0L
+
+    // Insets de display cutout (API 28+): mantêm os controles fora da câmera.
+    private var safeL = 0
+    private var safeT = 0
+    private var safeR = 0
+    private var safeB = 0
+
+    // Botão de alternar HUD (quina inferior direita) — geometria própria.
+    private var toggleX = 0f
+    private var toggleY = 0f
+    private var toggleR = 0f
+    private var toggleHitR = 0f
+    private var toggleScrim: Shader? = null
+
     private val tmpPath = Path()
 
     init {
@@ -230,93 +382,201 @@ class VirtualPadView @JvmOverloads constructor(
         // libmain.so já foi carregada pelo SDLActivity (super.onCreate) antes
         // desta view ser adicionada à hierarquia.
         runCatching { nativeInit() }
+        // Auto-recuperação: se a Activity foi recriada com o jogo rodando, a
+        // transição em notify_game_started não re-dispara; consultamos direto.
+        // A preferência do usuário (HUD oculto) é respeitada.
+        runCatching {
+            if (nativeIsGameStarted()) {
+                gameStarted = true
+                padVisible = prefs.getBoolean(PREF_HUD_VISIBLE, true)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- jni
     private external fun nativeInit()
     private external fun nativeButton(id: Int, pressed: Boolean)
     private external fun nativeAxis(x: Float, y: Float)
+    private external fun nativeIsGameStarted(): Boolean
 
     // ---------------------------------------------------------------- estado
     private fun handleGameStarted(started: Boolean) {
         gameStarted = started
-        if (!started) {
-            padVisible = false
-            releaseAll(sendNative = true)
-        }
-        invalidate()
+        // Auto-show com fade+deslize; a escolha de esconder (persistida) vence.
+        padVisible = started && prefs.getBoolean(PREF_HUD_VISIBLE, true)
+        if (!started) releaseAll()
+        postInvalidateOnAnimation()
     }
 
     private fun setPadVisible(visible: Boolean) {
         if (padVisible == visible) return
         padVisible = visible
-        releaseAll(sendNative = true)
-        invalidate()
+        prefs.edit().putBoolean(PREF_HUD_VISIBLE, visible).apply()
+        if (!visible) releaseAll()
+        postInvalidateOnAnimation()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        if (instance === this) instance = null
+        releaseAll()
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        // Cinto de segurança: alguns OEMs/fluxos não entregam ACTION_CANCEL ao
+        // roubar o gesto — sem isto, botões ficariam presos durante a pausa.
+        if (!hasWindowFocus) releaseAll()
     }
 
     // ---------------------------------------------------------------- layout
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        applyLayout()
+    }
+
+    override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        // Captura o cutout (API 28+; minSdk 26 não tem cutout reportado) e
+        // re-layouta. NÃO consome o insets: outros filhos podem precisar.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val cutout = insets.displayCutout
+            if (cutout != null) {
+                safeL = cutout.safeInsetLeft
+                safeT = cutout.safeInsetTop
+                safeR = cutout.safeInsetRight
+                safeB = cutout.safeInsetBottom
+                applyLayout()
+            }
+        }
+        return insets
+    }
+
+    /** Recalcula geometria de todos os controles a partir da área útil. */
+    private fun applyLayout() {
+        val w = width
+        val h = height
         if (w == 0 || h == 0) return
 
         val fw = w.toFloat()
         val fh = h.toFloat()
-        // Escala do N64Pad2: referência 1280x720 paisagem.
-        unit = min(fh / 720f, fw / 1280f)
+        val base = min(fh / 720f, fw / 1280f)
+        // API 26/27 não reportam cutout: margem lateral extra para vidros curvos.
+        val extraSide = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) 12f * base else 0f
+        val margin = 6f * base
+        val left = safeL + margin + extraSide
+        val top = safeT + margin
+        val right = fw - safeR - margin - extraSide
+        val bottom = fh - safeB - margin
+        val aw = right - left
+        val ah = bottom - top
+        if (aw <= 0f || ah <= 0f) return
 
-        // ---- gatilhos (topo, estilo Dolphin: quinas + centro)
-        val trigW = 190f * unit
-        val trigH = 96f * unit
-        lt.rect.set(fw * 0.045f, fh * 0.045f, fw * 0.045f + trigW, fh * 0.045f + trigH)
-        lt.radius = 26f * unit
-        rt.rect.set(fw * 0.955f - trigW, fh * 0.045f, fw * 0.955f, fh * 0.045f + trigH)
-        rt.radius = 26f * unit
-        zt.rect.set(fw * 0.44f, fh * 0.045f, fw * 0.56f, fh * 0.045f + trigH)
-        zt.radius = 26f * unit
+        unit = min(ah / 720f, aw / 1280f)
+        fun fx(f: Float) = left + aw * f
+        fun fy(f: Float) = top + ah * f
+
+        // ---- gatilhos (topo): Z (esq — pose do indicador esquerdo do N64,
+        // desbloqueia Z+stick, Z+A e o ground pound) · L (centro, uso raro) · R (dir)
+        val trigW = 185f * unit
+        val trigH = 90f * unit
+        val trigY = fy(0.04f)
+        pillZ.layout(fx(0.035f), trigY, fx(0.035f) + trigW, trigY + trigH)
+        pillL.layout(fx(0.5f) - trigW / 2f, trigY, fx(0.5f) + trigW / 2f, trigY + trigH)
+        pillR.layout(fx(0.965f) - trigW, trigY, fx(0.965f), trigY + trigH)
 
         // ---- analógico (esquerda)
-        leftStick.cx = fw * 0.115f
-        leftStick.cy = fh * 0.60f
-        leftStick.outerR = 92f * unit
-        leftStick.knobR = 46f * unit
+        stick.layout(fx(0.12f), fy(0.63f), 96f * unit, 47f * unit)
 
         // ---- D-pad (base esquerda-centro)
-        dpad.cx = fw * 0.27f
-        dpad.cy = fh * 0.80f
-        dpad.size = 66f * unit
-        dpad.armWidth = 32f * unit
+        dpad.layout(fx(0.28f), fy(0.82f), 66f * unit, 33f * unit)
 
-        // ---- START e MENU (base central)
-        btnStart.cx = fw * 0.475f
-        btnStart.cy = fh * 0.88f
-        btnStart.r = 36f * unit
+        // ---- START (base central) e MENU (dentro do arco do polegar direito)
+        btnStart.layout(fx(0.475f), fy(0.87f), 34f * unit, unit)
+        btnMenu.layout(fx(0.655f), fy(0.88f), 30f * unit, unit)
 
-        btnMenu.cx = fw * 0.575f
-        btnMenu.cy = fh * 0.88f
-        btnMenu.r = 30f * unit
+        // ---- losango de botões C (elíptico, junto do arco do polegar direito;
+        // células de toque ~48dp em phones 20:9)
+        val cCx = fx(0.76f)
+        val cCy = fy(0.42f)
+        val spreadX = 84f * unit
+        val spreadY = 70f * unit
+        val cR = 33f * unit
+        btnCU.layout(cCx, cCy - spreadY, cR, unit)
+        btnCD.layout(cCx, cCy + spreadY, cR, unit)
+        btnCL.layout(cCx - spreadX, cCy, cR, unit)
+        btnCR.layout(cCx + spreadX, cCy, cR, unit)
 
-        // ---- losango de botões C (direita, acima do A)
-        val clusterX = fw * 0.735f
-        val clusterY = fh * 0.335f
-        val spread = 62f * unit
-        val cR = 26f * unit
-        btnCU.cx = clusterX; btnCU.cy = clusterY - spread; btnCU.r = cR
-        btnCD.cx = clusterX; btnCD.cy = clusterY + spread; btnCD.r = cR
-        btnCL.cx = clusterX - spread; btnCL.cy = clusterY; btnCL.r = cR
-        btnCR.cx = clusterX + spread; btnCR.cy = clusterY; btnCR.r = cR
-
-        // ---- A (grande) e B (menor, diagonal inferior-esquerda, como no N64)
-        btnA.cx = fw * 0.875f
-        btnA.cy = fh * 0.575f
-        btnA.r = 46f * unit
-
-        btnB.cx = fw * 0.735f
-        btnB.cy = fh * 0.70f
-        btnB.r = 32f * unit
+        // ---- A (principal) e B (adjacente, encadeamento A→B barato)
+        btnA.layout(fx(0.88f), fy(0.58f), 52f * unit, unit)
+        btnB.layout(fx(0.79f), fy(0.72f), 37f * unit, unit)
 
         // ---- botão de alternar HUD (quina inferior direita)
-        val tR = 26f * unit
-        toggleRect.set(fw * 0.945f - tR, fh * 0.90f - tR, fw * 0.945f + tR, fh * 0.90f + tR)
+        toggleX = fx(0.94f)
+        toggleY = fy(0.89f)
+        toggleR = 24f * unit
+        toggleHitR = max(toggleR * 1.5f, MIN_HIT_UNIT * unit)
+        toggleScrim = RadialGradient(toggleX, toggleY, toggleR * 2.4f,
+            intArrayOf(0x5A000000, Color.TRANSPARENT), SHADOW_STOPS, Shader.TileMode.CLAMP)
+
+        rebuildShaders()
+    }
+
+    /** (Re)constrói os shaders cacheados — chamado só quando a geometria muda. */
+    private fun rebuildShaders() {
+        for (b in roundButtons) {
+            b.glass = LinearGradient(b.cx, b.cy - b.r, b.cx, b.cy + b.r,
+                intArrayOf(HILITE_TOP, HILITE_BOT), TWO_STOPS, Shader.TileMode.CLAMP)
+            b.shadow = RadialGradient(b.cx, b.cy, b.r * 1.5f,
+                intArrayOf(SHADOW_COLOR, Color.TRANSPARENT), SHADOW_STOPS, Shader.TileMode.CLAMP)
+            b.glow = RadialGradient(b.cx, b.cy, b.r * 1.38f,
+                intArrayOf(Color.TRANSPARENT, b.tintPress, Color.TRANSPARENT),
+                GLOW_STOPS, Shader.TileMode.CLAMP)
+        }
+        for (p in pills) {
+            val cxp = p.rect.centerX()
+            val cyp = p.rect.centerY()
+            p.glass = LinearGradient(cxp, p.rect.top, cxp, p.rect.bottom,
+                intArrayOf(HILITE_TOP, HILITE_BOT), TWO_STOPS, Shader.TileMode.CLAMP)
+            p.shadow = RadialGradient(cxp, cyp, max(p.rect.width(), p.rect.height()) * 0.72f,
+                intArrayOf(SHADOW_COLOR, Color.TRANSPARENT), SHADOW_STOPS, Shader.TileMode.CLAMP)
+        }
+        stick.glass = LinearGradient(stick.cx, stick.cy - stick.outerR,
+            stick.cx, stick.cy + stick.outerR,
+            intArrayOf(HILITE_TOP, HILITE_BOT), TWO_STOPS, Shader.TileMode.CLAMP)
+        stick.shadow = RadialGradient(stick.cx, stick.cy, stick.outerR * 1.45f,
+            intArrayOf(SHADOW_COLOR, Color.TRANSPARENT), SHADOW_STOPS, Shader.TileMode.CLAMP)
+        stick.glow = RadialGradient(stick.cx, stick.cy, stick.outerR * 1.3f,
+            intArrayOf(Color.TRANSPARENT, ACCENT, Color.TRANSPARENT), GLOW_STOPS,
+            Shader.TileMode.CLAMP)
+        stick.knobGrad = RadialGradient(stick.cx, stick.cy, stick.knobR,
+            intArrayOf(HILITE_TOP, HILITE_BOT), TWO_STOPS, Shader.TileMode.CLAMP)
+
+        // Cruz do D-pad: polígono de 12 pontos (contorno único, sem costura).
+        dpad.crossPath = plusPath(dpad.cx, dpad.cy, dpad.size, dpad.arm)
+        dpad.shadowPath = plusPath(dpad.cx, dpad.cy, dpad.size * 1.16f, dpad.arm * 1.16f)
+        dpad.glass = LinearGradient(dpad.cx, dpad.cy - dpad.size, dpad.cx, dpad.cy + dpad.size,
+            intArrayOf(HILITE_TOP, HILITE_BOT), TWO_STOPS, Shader.TileMode.CLAMP)
+        dpad.shadow = RadialGradient(dpad.cx, dpad.cy, dpad.size * 1.5f,
+            intArrayOf(SHADOW_COLOR, Color.TRANSPARENT), SHADOW_STOPS, Shader.TileMode.CLAMP)
+    }
+
+    /** Cruz (plus) de contorno único, centrada em (cx, cy). */
+    private fun plusPath(cx: Float, cy: Float, size: Float, arm: Float): Path {
+        val p = Path()
+        p.moveTo(cx - arm, cy - size)
+        p.lineTo(cx + arm, cy - size)
+        p.lineTo(cx + arm, cy - arm)
+        p.lineTo(cx + size, cy - arm)
+        p.lineTo(cx + size, cy + arm)
+        p.lineTo(cx + arm, cy + arm)
+        p.lineTo(cx + arm, cy + size)
+        p.lineTo(cx - arm, cy + size)
+        p.lineTo(cx - arm, cy + arm)
+        p.lineTo(cx - size, cy + arm)
+        p.lineTo(cx - size, cy - arm)
+        p.lineTo(cx - arm, cy - arm)
+        p.close()
+        return p
     }
 
     // ---------------------------------------------------------------- desenho
@@ -324,258 +584,472 @@ class VirtualPadView @JvmOverloads constructor(
         super.onDraw(canvas)
         if (!gameStarted) return // launcher: overlay 100% pass-through
 
-        // botão de alternância existe sempre (mostrar/esconder o HUD)
+        val now = SystemClock.elapsedRealtime()
+        val dt = if (lastFrame == 0L) 16f else (now - lastFrame).coerceIn(1L, 50L).toFloat()
+        lastFrame = now
+        val animating = advanceAnimations(dt)
+
         drawToggle(canvas)
 
-        if (!padVisible) return
+        if (hudAlpha > 0.01f) {
+            // fade + deslize: o HUD sobe ao entrar e desce ao sair
+            canvas.save()
+            canvas.translate(0f, (1f - hudAlpha) * 24f * unit)
+            for (p in pills) drawPill(canvas, p)
+            drawStick(canvas)
+            drawDPad(canvas)
+            for (b in roundButtons) drawRound(canvas, b)
+            canvas.restore()
+        }
 
-        for (b in shoulders) drawShoulder(canvas, b)
-        drawStick(canvas)
-        drawDPad(canvas)
-        for (b in cButtons) drawCButton(canvas, b)
-        for (b in faceButtons) drawFaceButton(canvas, b)
+        if (animating) postInvalidateOnAnimation()
     }
 
-    /** halo escuro atrás do controle para destacar sobre o jogo */
-    private fun drawHalo(canvas: Canvas, cx: Float, cy: Float, r: Float, pressed: Boolean) {
-        fillPaint.color = colHalo
-        fillPaint.alpha = if (pressed) 120 else 92
-        canvas.drawCircle(cx, cy, r, fillPaint)
-        fillPaint.alpha = 255
-    }
+    private fun drawRound(canvas: Canvas, b: RoundControl) {
+        val e = ease(b.press)
+        val hud = hudAlpha
+        val scale = 1f - 0.06f * e
+        canvas.save()
+        canvas.scale(scale, scale, b.cx, b.cy)
 
-    private fun drawToggle(canvas: Canvas) {
-        val cx = toggleRect.centerX()
-        val cy = toggleRect.centerY()
-        val r = toggleRect.width() / 2f
-        drawHalo(canvas, cx, cy, r * 1.1f, false)
+        // sombra suave (disco maior que o controle, desvanecendo)
+        if (b.shadow != null) {
+            fillPaint.shader = b.shadow
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawCircle(b.cx, b.cy, b.r * 1.5f, fillPaint)
+            fillPaint.shader = null
+        }
 
-        strokePaint.pathEffect = null
-        strokePaint.strokeWidth = 3f * unit
-        strokePaint.color = colOutline
-        strokePaint.alpha = 200
-        canvas.drawCircle(cx, cy, r, strokePaint)
+        // vidro: base escura + gradiente de brilho
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (GLASS_ALPHA * hud).toInt()
+        canvas.drawCircle(b.cx, b.cy, b.r, fillPaint)
+        if (b.glass != null) {
+            fillPaint.shader = b.glass
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawCircle(b.cx, b.cy, b.r, fillPaint)
+            fillPaint.shader = null
+        }
 
-        // ícone: ✕ (esconder) ou desenho de controle (mostrar)
-        strokePaint.color = Color.WHITE
-        strokePaint.alpha = 230
-        if (padVisible) {
-            val k = r * 0.42f
-            canvas.drawLine(cx - k, cy - k, cx + k, cy + k, strokePaint)
-            canvas.drawLine(cx - k, cy + k, cx + k, cy - k, strokePaint)
-        } else {
-            // mini-controle: retângulo com dois "furos" de grip
-            val w = r * 1.1f
-            val h = r * 0.62f
-            canvas.drawRoundRect(cx - w, cy - h, cx + w, cy + h, h, h, strokePaint)
+        // press: clareia o vidro (botão "afunda" e acende)
+        if (e > 0f) {
+            fillPaint.shader = null
             fillPaint.color = Color.WHITE
-            fillPaint.alpha = 230
-            canvas.drawCircle(cx - w * 0.45f, cy, r * 0.10f, fillPaint)
-            canvas.drawCircle(cx + w * 0.45f, cy, r * 0.10f, fillPaint)
-            fillPaint.alpha = 255
+            fillPaint.alpha = (0x26 * e * hud).toInt()
+            canvas.drawCircle(b.cx, b.cy, b.r, fillPaint)
         }
+
+        // glow de identidade (anel com gradiente radial)
+        if (e > 0f && b.glow != null) {
+            fillPaint.shader = b.glow
+            fillPaint.alpha = (200 * e * hud).toInt()
+            canvas.drawCircle(b.cx, b.cy, b.r * 1.38f, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // borda: tinta idle -> cor de identidade no press
+        strokePaint.strokeWidth = 2.5f * unit
+        strokePaint.color = lerpColor(b.tintIdle, b.tintPress, e)
+        strokePaint.alpha = ((BORDER_ALPHA + (255 - BORDER_ALPHA) * e) * hud).toInt()
+        canvas.drawCircle(b.cx, b.cy, b.r, strokePaint)
+
+        // conteúdo: seta (C), ícone (MENU) ou label
+        if (b.drawArrow) {
+            fillPaint.shader = null
+            fillPaint.color = lerpColor(b.tintIdle, Color.WHITE, e)
+            fillPaint.alpha = (labelAlpha(e) * hud).toInt()
+            drawArrow(canvas, b.cx, b.cy, b.r * 0.55f, b.arrowAngleDeg)
+        } else if (b.id == BTN_MENU) {
+            strokePaint.strokeWidth = b.r * 0.14f
+            strokePaint.color = lerpColor(b.tintIdle, Color.WHITE, e)
+            strokePaint.alpha = (labelAlpha(e) * hud).toInt()
+            val w = b.r * 0.5f
+            val gap = b.r * 0.30f
+            for (i in -1..1) {
+                canvas.drawLine(b.cx - w, b.cy + i * gap, b.cx + w, b.cy + i * gap, strokePaint)
+            }
+        } else if (b.label.isNotEmpty()) {
+            textPaint.typeface = labelFont
+            textPaint.isFakeBoldText = Build.VERSION.SDK_INT < Build.VERSION_CODES.P
+            textPaint.textSize = b.r * b.labelScale
+            textPaint.letterSpacing = if (b.id == BTN_START) 0.12f else 0f
+            textPaint.color = lerpColor(b.tintIdle, Color.WHITE, e)
+            textPaint.alpha = (labelAlpha(e) * hud).toInt()
+            canvas.drawText(b.label, b.cx, b.cy + textPaint.textSize * 0.35f, textPaint)
+        }
+
+        canvas.restore()
+        fillPaint.alpha = 255
         strokePaint.alpha = 255
+        textPaint.alpha = 255
     }
 
-    private fun drawShoulder(canvas: Canvas, b: ShoulderBtn) {
-        strokePaint.pathEffect = null
-        strokePaint.strokeWidth = 5f * unit
-        strokePaint.color = if (b.pressed) colAccent else colOutline
-        strokePaint.alpha = if (b.pressed) 255 else (255 * ALPHA_IDLE).toInt()
+    private fun drawPill(canvas: Canvas, p: PillControl) {
+        val e = ease(p.press)
+        val hud = hudAlpha
+        val rad = p.radius
+        val scale = 1f - 0.05f * e
+        val cxp = p.rect.centerX()
+        val cyp = p.rect.centerY()
+        canvas.save()
+        canvas.scale(scale, scale, cxp, cyp)
 
-        if (b.pressed) {
-            fillPaint.color = Color.parseColor("#1F2A10")
-            fillPaint.alpha = 230
-            canvas.drawRoundRect(b.rect, b.radius, b.radius, fillPaint)
-            fillPaint.alpha = 255
-        } else {
-            fillPaint.color = colHalo
-            fillPaint.alpha = 70
-            canvas.drawRoundRect(b.rect, b.radius, b.radius, fillPaint)
-            fillPaint.alpha = 255
+        // sombra suave (retângulo inflado com gradiente)
+        if (p.shadow != null) {
+            fillPaint.shader = p.shadow
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawRoundRect(p.shadowRect, p.shadowRect.height() / 2f,
+                p.shadowRect.height() / 2f, fillPaint)
+            fillPaint.shader = null
         }
-        canvas.drawRoundRect(b.rect, b.radius, b.radius, strokePaint)
 
-        // linha interna sutil (identidade N64Pad2/X360Pad)
-        strokePaint.strokeWidth = 2f * unit
-        strokePaint.color = if (b.pressed) colAccent else colOutlineDim
-        strokePaint.alpha = if (b.pressed) 255 else (255 * ALPHA_IDLE * 0.9f).toInt()
-        val inset = 8f * unit
-        canvas.drawRoundRect(
-            b.rect.left + inset, b.rect.top + inset,
-            b.rect.right - inset, b.rect.bottom - inset,
-            b.radius * 0.8f, b.radius * 0.8f, strokePaint
-        )
+        // vidro
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (GLASS_ALPHA * hud).toInt()
+        canvas.drawRoundRect(p.rect, rad, rad, fillPaint)
+        if (p.glass != null) {
+            fillPaint.shader = p.glass
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawRoundRect(p.rect, rad, rad, fillPaint)
+            fillPaint.shader = null
+        }
 
-        textPaint.textSize = 42f * unit
-        textPaint.color = if (b.pressed) colAccent else colOutline
-        textPaint.alpha = if (b.pressed) 255 else (255 * (ALPHA_IDLE + 0.25f)).toInt()
-        canvas.drawText(b.label, b.rect.centerX(), b.rect.centerY() + textPaint.textSize * 0.36f, textPaint)
+        if (e > 0f) {
+            fillPaint.shader = null
+            fillPaint.color = Color.WHITE
+            fillPaint.alpha = (0x26 * e * hud).toInt()
+            canvas.drawRoundRect(p.rect, rad, rad, fillPaint)
+        }
+
+        strokePaint.strokeWidth = 2.5f * unit
+        strokePaint.color = lerpColor(p.tintIdle, p.tintPress, e)
+        strokePaint.alpha = ((BORDER_ALPHA + (255 - BORDER_ALPHA) * e) * hud).toInt()
+        canvas.drawRoundRect(p.rect, rad, rad, strokePaint)
+
+        textPaint.typeface = labelFont
+        textPaint.isFakeBoldText = Build.VERSION.SDK_INT < Build.VERSION_CODES.P
+        textPaint.letterSpacing = 0f
+        textPaint.textSize = p.rect.height() * 0.40f
+        textPaint.color = lerpColor(p.tintIdle, Color.WHITE, e)
+        textPaint.alpha = (labelAlpha(e) * hud).toInt()
+        canvas.drawText(p.label, cxp, cyp + textPaint.textSize * 0.35f, textPaint)
+
+        canvas.restore()
+        fillPaint.alpha = 255
         strokePaint.alpha = 255
         textPaint.alpha = 255
     }
 
     private fun drawStick(canvas: Canvas) {
-        val cx = leftStick.cx
-        val cy = leftStick.cy
-        val r = leftStick.outerR
-        val alpha = if (leftStick.active) 255 else (255 * ALPHA_IDLE).toInt()
+        val s = stick
+        val e = ease(s.press)
+        val hud = hudAlpha
 
-        drawHalo(canvas, cx, cy, r * 1.06f, leftStick.active)
-
-        strokePaint.pathEffect = null
-        strokePaint.strokeWidth = 4f * unit
-        strokePaint.color = if (leftStick.active) colAccent else colOutline
-        strokePaint.alpha = alpha
-        canvas.drawCircle(cx, cy, r, strokePaint)
-
-        // setas de direção internas (8 posições) — identidade N64Pad2
-        val arrowR = r * 0.70f
-        val arrowSize = r * 0.11f
-        fillPaint.color = if (leftStick.active) colAccent else colOutlineDim
-        fillPaint.alpha = alpha
-        for (i in 0 until 8) {
-            val ang = Math.toRadians((i * 45).toDouble())
-            val ax = cx + (arrowR * cos(ang)).toFloat()
-            val ay = cy + (arrowR * sin(ang)).toFloat()
-            drawTriangle(canvas, ax, ay, arrowSize, ang.toFloat())
+        // sombra do anel
+        if (s.shadow != null) {
+            fillPaint.shader = s.shadow
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawCircle(s.cx, s.cy, s.outerR * 1.45f, fillPaint)
+            fillPaint.shader = null
         }
 
-        // knob (segue o dedo)
-        val kx = cx + leftStick.dx * (r - leftStick.knobR) * 0.92f
-        val ky = cy + leftStick.dy * (r - leftStick.knobR) * 0.92f
-        strokePaint.strokeWidth = 5f * unit
-        strokePaint.color = if (leftStick.active) colAccent else colOutline
-        strokePaint.alpha = alpha
-        if (leftStick.active) {
-            fillPaint.color = Color.parseColor("#17210C")
-            fillPaint.alpha = 235
-            canvas.drawCircle(kx, ky, leftStick.knobR, fillPaint)
-            fillPaint.alpha = 255
+        // anel externo de vidro
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (GLASS_ALPHA * hud).toInt()
+        canvas.drawCircle(s.cx, s.cy, s.outerR, fillPaint)
+        if (s.glass != null) {
+            fillPaint.shader = s.glass
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawCircle(s.cx, s.cy, s.outerR, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // ticks de direção (8 pontos) — o tick da direção atual acende
+        // (só fora da zona morta: o feedback visual mente nunca)
+        val tickIn = s.outerR * 0.76f
+        val tickOut = s.outerR * 0.88f
+        val activeTick = if (s.active && hypot(s.dx, s.dy) > STICK_DEADZONE) {
+            nearestTickIndex(s.dx, s.dy)
         } else {
-            fillPaint.color = colHalo
-            fillPaint.alpha = 110
-            canvas.drawCircle(kx, ky, leftStick.knobR, fillPaint)
-            fillPaint.alpha = 255
+            -1
         }
-        canvas.drawCircle(kx, ky, leftStick.knobR, strokePaint)
-        strokePaint.alpha = 255
+        strokePaint.strokeWidth = 2f * unit
+        for (i in 0 until 8) {
+            val ang = (i * 45f) * (Math.PI.toFloat() / 180f)
+            val ca = cos(ang)
+            val sa = sin(ang)
+            val on = i == activeTick
+            strokePaint.color = if (on) ACCENT else Color.WHITE
+            strokePaint.alpha = ((if (on) 220 else 70) * hud).toInt()
+            canvas.drawLine(s.cx + ca * tickIn, s.cy + sa * tickIn,
+                s.cx + ca * tickOut, s.cy + sa * tickOut, strokePaint)
+        }
+
+        // borda do anel + glow quando ativo
+        strokePaint.strokeWidth = 2.5f * unit
+        strokePaint.color = lerpColor(TINT_NEUTRAL, ACCENT, e)
+        strokePaint.alpha = ((BORDER_ALPHA + (255 - BORDER_ALPHA) * e) * hud).toInt()
+        canvas.drawCircle(s.cx, s.cy, s.outerR, strokePaint)
+        if (e > 0f && s.glow != null) {
+            fillPaint.shader = s.glow
+            fillPaint.alpha = (160 * e * hud).toInt()
+            canvas.drawCircle(s.cx, s.cy, s.outerR * 1.3f, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // knob (segue o dedo com suavização visual; o input nativo é bruto)
+        val kx = s.cx + s.kx * s.travel
+        val ky = s.cy + s.ky * s.travel
+        fillPaint.shader = null
+        fillPaint.color = Color.BLACK
+        fillPaint.alpha = (45 * hud).toInt()
+        canvas.drawCircle(kx, ky, s.knobR * 1.18f, fillPaint)
+
+        canvas.save()
+        canvas.translate(kx - s.cx, ky - s.cy)
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (220 * hud).toInt()
+        canvas.drawCircle(s.cx, s.cy, s.knobR, fillPaint)
+        if (s.knobGrad != null) {
+            fillPaint.shader = s.knobGrad
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawCircle(s.cx, s.cy, s.knobR, fillPaint)
+            fillPaint.shader = null
+        }
+        // grip interno
+        strokePaint.strokeWidth = 2f * unit
+        strokePaint.color = Color.WHITE
+        strokePaint.alpha = (70 * hud).toInt()
+        canvas.drawCircle(s.cx, s.cy, s.knobR * 0.66f, strokePaint)
+        // borda do knob
+        strokePaint.strokeWidth = 2.5f * unit
+        strokePaint.color = lerpColor(TINT_NEUTRAL, ACCENT, e)
+        strokePaint.alpha = ((BORDER_ALPHA + (255 - BORDER_ALPHA) * e) * hud).toInt()
+        canvas.drawCircle(s.cx, s.cy, s.knobR, strokePaint)
+        canvas.restore()
+
         fillPaint.alpha = 255
+        strokePaint.alpha = 255
     }
 
-    /** triângulo apontando para fora, no ângulo informado */
-    private fun drawTriangle(canvas: Canvas, x: Float, y: Float, size: Float, angle: Float) {
+    private fun drawDPad(canvas: Canvas) {
+        val d = dpad
+        val e = ease(d.press)
+        val hud = hudAlpha
+        val path = d.crossPath ?: return
+
+        // sombra suave (cruz inflada)
+        val shadowPath = d.shadowPath
+        if (shadowPath != null) {
+            fillPaint.shader = d.shadow
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawPath(shadowPath, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // vidro
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (GLASS_ALPHA * hud).toInt()
+        canvas.drawPath(path, fillPaint)
+        if (d.glass != null) {
+            fillPaint.shader = d.glass
+            fillPaint.alpha = (255 * hud).toInt()
+            canvas.drawPath(path, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // braços acionados (accent com alpha)
+        if (d.anyDir) {
+            fillPaint.shader = null
+            fillPaint.color = ACCENT
+            fillPaint.alpha = (90 * hud).toInt()
+            val ar = d.arm
+            if (d.up) canvas.drawRoundRect(d.cx - ar, d.cy - d.size, d.cx + ar, d.cy, ar, ar, fillPaint)
+            if (d.down) canvas.drawRoundRect(d.cx - ar, d.cy, d.cx + ar, d.cy + d.size, ar, ar, fillPaint)
+            if (d.left) canvas.drawRoundRect(d.cx - d.size, d.cy - ar, d.cx, d.cy + ar, ar, ar, fillPaint)
+            if (d.right) canvas.drawRoundRect(d.cx, d.cy - ar, d.cx + d.size, d.cy + ar, ar, ar, fillPaint)
+        }
+
+        // borda + ponto central
+        strokePaint.strokeWidth = 2.5f * unit
+        strokePaint.color = lerpColor(TINT_NEUTRAL, ACCENT, e)
+        strokePaint.alpha = ((BORDER_ALPHA + (255 - BORDER_ALPHA) * e) * hud).toInt()
+        canvas.drawPath(path, strokePaint)
+        fillPaint.shader = null
+        fillPaint.color = ACCENT
+        fillPaint.alpha = (140 * hud).toInt()
+        canvas.drawCircle(d.cx, d.cy, d.arm * 0.28f, fillPaint)
+
+        fillPaint.alpha = 255
+        strokePaint.alpha = 255
+    }
+
+    /** Botão de mostrar/esconder o HUD — sempre presente com o jogo rodando. */
+    private fun drawToggle(canvas: Canvas) {
+        val hud = hudAlpha
+        val e = ease(togglePress)
+        // Piso mais alto que o resto do HUD: é a única porta de volta do pad.
+        val alpha = ((0.58f + 0.27f * (1f - hud)) * 255f).toInt()
+        val scale = 1f - 0.06f * e
+
+        canvas.save()
+        canvas.scale(scale, scale, toggleX, toggleY)
+
+        // scrim radial discreto: garante contraste sobre cenas claras
+        if (toggleScrim != null) {
+            fillPaint.shader = toggleScrim
+            fillPaint.alpha = 255
+            canvas.drawCircle(toggleX, toggleY, toggleR * 2.4f, fillPaint)
+            fillPaint.shader = null
+        }
+
+        // vidro + borda
+        fillPaint.shader = null
+        fillPaint.color = GLASS_RGB
+        fillPaint.alpha = (GLASS_ALPHA * alpha / 255).toInt()
+        canvas.drawCircle(toggleX, toggleY, toggleR, fillPaint)
+        strokePaint.strokeWidth = 2f * unit
+        strokePaint.color = ACCENT
+        strokePaint.alpha = (alpha * min(1f, toggleFlash + 0.35f)).toInt()
+        canvas.drawCircle(toggleX, toggleY, toggleR, strokePaint)
+
+        // glyph: mini gamepad
+        val w = toggleR * 1.05f
+        val h = toggleR * 0.62f
+        strokePaint.color = Color.WHITE
+        strokePaint.alpha = (alpha * 0.9f).toInt()
+        strokePaint.strokeWidth = 2f * unit
+        canvas.drawRoundRect(toggleX - w, toggleY - h, toggleX + w, toggleY + h, h, h, strokePaint)
+        fillPaint.shader = null
+        fillPaint.color = Color.WHITE
+        fillPaint.alpha = (alpha * 0.9f).toInt()
+        canvas.drawCircle(toggleX - w * 0.42f, toggleY, toggleR * 0.10f, fillPaint)
+        canvas.drawCircle(toggleX + w * 0.42f, toggleY, toggleR * 0.10f, fillPaint)
+
+        // badge ✕ quando o HUD está visível
+        if (padVisible) {
+            val bx = toggleX + toggleR * 0.72f
+            val by = toggleY - toggleR * 0.72f
+            val br = toggleR * 0.42f
+            fillPaint.shader = null
+            fillPaint.color = GLASS_RGB
+            fillPaint.alpha = (235 * alpha / 255).toInt()
+            canvas.drawCircle(bx, by, br, fillPaint)
+            strokePaint.strokeWidth = 1.5f * unit
+            strokePaint.color = Color.WHITE
+            strokePaint.alpha = (alpha * 0.95f).toInt()
+            canvas.drawCircle(bx, by, br, strokePaint)
+            val k = br * 0.42f
+            canvas.drawLine(bx - k, by - k, bx + k, by + k, strokePaint)
+            canvas.drawLine(bx - k, by + k, bx + k, by - k, strokePaint)
+        }
+
+        canvas.restore()
+        fillPaint.alpha = 255
+        strokePaint.alpha = 255
+    }
+
+    /** Setinha triangular apontando para fora (botões C). */
+    private fun drawArrow(canvas: Canvas, x: Float, y: Float, size: Float, angleDeg: Float) {
+        val ang = Math.toRadians(angleDeg.toDouble()).toFloat()
+        val tipX = x + size * cos(ang)
+        val tipY = y + size * sin(ang)
+        val a1 = ang + 2.5f
+        val a2 = ang - 2.5f
         tmpPath.reset()
-        val tipX = x + size * cos(angle)
-        val tipY = y + size * sin(angle)
-        val a1 = angle + 2.4f
-        val a2 = angle - 2.4f
         tmpPath.moveTo(tipX, tipY)
-        tmpPath.lineTo(x + size * cos(a1), y + size * sin(a1))
-        tmpPath.lineTo(x + size * cos(a2), y + size * sin(a2))
+        tmpPath.lineTo(x + size * 0.45f * cos(a1), y + size * 0.45f * sin(a1))
+        tmpPath.lineTo(x + size * 0.45f * cos(a2), y + size * 0.45f * sin(a2))
         tmpPath.close()
         canvas.drawPath(tmpPath, fillPaint)
     }
 
-    private fun drawDPad(canvas: Canvas) {
-        val cx = dpad.cx
-        val cy = dpad.cy
-        val s = dpad.size
-        val a = dpad.armWidth
-
-        tmpPath.reset()
-        tmpPath.moveTo(cx - a, cy - s)
-        tmpPath.lineTo(cx + a, cy - s)
-        tmpPath.lineTo(cx + a, cy - a)
-        tmpPath.lineTo(cx + s, cy - a)
-        tmpPath.lineTo(cx + s, cy + a)
-        tmpPath.lineTo(cx + a, cy + a)
-        tmpPath.lineTo(cx + a, cy + s)
-        tmpPath.lineTo(cx - a, cy + s)
-        tmpPath.lineTo(cx - a, cy + a)
-        tmpPath.lineTo(cx - s, cy + a)
-        tmpPath.lineTo(cx - s, cy - a)
-        tmpPath.lineTo(cx - a, cy - a)
-        tmpPath.close()
-
-        val anyDir = dpad.up || dpad.down || dpad.left || dpad.right
-        val alpha = if (dpad.pressed) 255 else (255 * ALPHA_IDLE).toInt()
-
-        drawHalo(canvas, cx, cy, s * 1.12f, anyDir)
-
-        strokePaint.pathEffect = CornerPathEffect(10f * unit)
-        strokePaint.strokeWidth = 5f * unit
-        strokePaint.color = if (anyDir) colAccent else colOutline
-        strokePaint.alpha = alpha
-        canvas.drawPath(tmpPath, strokePaint)
-        strokePaint.pathEffect = null
-
-        // realce do braço acionado
-        fillPaint.color = Color.parseColor("#233010")
-        fillPaint.alpha = if (dpad.pressed) 235 else (235 * ALPHA_IDLE).toInt()
-        if (dpad.up) canvas.drawRect(cx - a, cy - s, cx + a, cy - a, fillPaint)
-        if (dpad.down) canvas.drawRect(cx - a, cy + a, cx + a, cy + s, fillPaint)
-        if (dpad.left) canvas.drawRect(cx - s, cy - a, cx - a, cy + a, fillPaint)
-        if (dpad.right) canvas.drawRect(cx + a, cy - a, cx + s, cy + a, fillPaint)
-        strokePaint.alpha = 255
-        fillPaint.alpha = 255
+    // -------------------------------------------------------------- animação
+    /** Avança uma animação de press (0..1). Método puro: sem captura/alocação. */
+    private fun stepPress(press: Float, target: Float, dt: Float): Float {
+        if (abs(target - press) <= 0.001f) return target
+        val rate = if (target > press) dt / PRESS_IN_MS else dt / PRESS_OUT_MS
+        return if (target > press) min(target, press + rate) else max(target, press - rate)
     }
 
-    private fun drawFaceButton(canvas: Canvas, b: RoundBtn) {
-        val alpha = if (b.pressed) 255 else (255 * ALPHA_IDLE).toInt()
-        drawHalo(canvas, b.cx, b.cy, b.r * 1.16f, b.pressed)
+    /** Avança todas as animações; true se ainda há movimento (continuar render). */
+    private fun advanceAnimations(dt: Float): Boolean {
+        var animating = false
 
-        fillPaint.color = b.fill
-        fillPaint.alpha = alpha
-        val rr = if (b.pressed) b.r * 1.08f else b.r
-        canvas.drawCircle(b.cx, b.cy, rr, fillPaint)
-
-        strokePaint.pathEffect = null
-        strokePaint.strokeWidth = 3f * unit
-        strokePaint.color = if (b.pressed) Color.WHITE else b.outline
-        strokePaint.alpha = alpha
-        canvas.drawCircle(b.cx, b.cy, rr, strokePaint)
-
-        val textSize = if (b.id == BTN_START) b.r * 0.42f else b.r * 1.05f
-        if (b.id == BTN_MENU) {
-            // ícone "hamburger" (3 traços) — independe da fonte do sistema
-            strokePaint.pathEffect = null
-            strokePaint.strokeWidth = b.r * 0.13f
-            strokePaint.color = if (b.pressed) Color.WHITE else b.outline
-            strokePaint.alpha = alpha
-            val w = b.r * 0.55f
-            val gap = b.r * 0.30f
-            for (i in -1..1) {
-                canvas.drawLine(b.cx - w, b.cy + i * gap, b.cx + w, b.cy + i * gap, strokePaint)
-            }
-        } else {
-            textPaint.textSize = textSize
-            textPaint.color = if (b.pressed) Color.WHITE else b.outline
-            textPaint.alpha = alpha
-            val labelY = if (b.id == BTN_START) b.cy + textSize * 0.35f else b.cy + textSize * 0.35f
-            canvas.drawText(b.label, b.cx, labelY, textPaint)
+        for (b in roundButtons) {
+            val next = stepPress(b.press, if (b.pressed) 1f else 0f, dt)
+            if (next != b.press) { b.press = next; animating = true }
+        }
+        for (p in pills) {
+            val next = stepPress(p.press, if (p.pressed) 1f else 0f, dt)
+            if (next != p.press) { p.press = next; animating = true }
+        }
+        run {
+            val next = stepPress(stick.press, if (stick.active) 1f else 0f, dt)
+            if (next != stick.press) { stick.press = next; animating = true }
+        }
+        run {
+            val next = stepPress(dpad.press, if (dpad.pressed) 1f else 0f, dt)
+            if (next != dpad.press) { dpad.press = next; animating = true }
+        }
+        run {
+            val next = stepPress(togglePress, if (togglePointerId != -1) 1f else 0f, dt)
+            if (next != togglePress) { togglePress = next; animating = true }
         }
 
-        fillPaint.alpha = 255
-        strokePaint.alpha = 255
-        textPaint.alpha = 255
+        // knob do stick volta suavemente (decaimento exponencial)
+        val k = 1f - exp(-dt / KNOB_RETURN_TAU)
+        val nkx = stick.kx + (stick.dx - stick.kx) * k
+        val nky = stick.ky + (stick.dy - stick.ky) * k
+        if (abs(nkx - stick.kx) > 0.0005f || abs(nky - stick.ky) > 0.0005f) {
+            stick.kx = nkx
+            stick.ky = nky
+            animating = true
+        }
+
+        // fade do HUD (com snap no alvo — termina exato, sem resíduo)
+        val hudTarget = if (padVisible) 1f else 0f
+        if (hudAlpha != hudTarget) {
+            val step = dt / HUD_FADE_MS
+            val next = if (hudAlpha < hudTarget) min(hudTarget, hudAlpha + step)
+                       else max(hudTarget, hudAlpha - step)
+            hudAlpha = if (abs(hudTarget - next) <= 0.001f) hudTarget else next
+            animating = true
+        }
+
+        // flash do toggle
+        if (toggleFlash > 0f) {
+            toggleFlash = max(0f, toggleFlash - dt / 160f)
+            animating = true
+        }
+
+        return animating
     }
 
-    /** botão C amarelo com uma seta indicando a direção (identidade N64Pad2) */
-    private fun drawCButton(canvas: Canvas, b: RoundBtn) {
-        drawFaceButton(canvas, b)
+    /** Easing suave (smoothstep) aplicado ao progresso de press. */
+    private fun ease(t: Float): Float = t * t * (3f - 2f * t)
 
-        val alpha = if (b.pressed) 255 else (255 * ALPHA_IDLE).toInt()
-        val ang = when (b.id) {
-            BTN_C_UP -> -Math.PI / 2.0
-            BTN_C_DOWN -> Math.PI / 2.0
-            BTN_C_LEFT -> Math.PI
-            else -> 0.0
-        }.toFloat()
-        fillPaint.color = if (b.pressed) Color.WHITE else b.outline
-        fillPaint.alpha = alpha
-        drawTriangle(canvas, b.cx, b.cy, b.r * 0.42f, ang)
-        fillPaint.alpha = 255
+    private fun labelAlpha(e: Float): Int =
+        (LABEL_ALPHA + (255 - LABEL_ALPHA) * e).toInt()
+
+    private fun lerpColor(c1: Int, c2: Int, t: Float): Int {
+        val r = (Color.red(c1) + (Color.red(c2) - Color.red(c1)) * t).toInt()
+        val g = (Color.green(c1) + (Color.green(c2) - Color.green(c1)) * t).toInt()
+        val b = (Color.blue(c1) + (Color.blue(c2) - Color.blue(c1)) * t).toInt()
+        return Color.rgb(r, g, b)
+    }
+
+    /** Índice do tick (0..7) mais próximo da direção atual do stick. */
+    private fun nearestTickIndex(dx: Float, dy: Float): Int {
+        if (dx == 0f && dy == 0f) return -1
+        val ang = atan2(dy, dx)
+        val idx = Math.round(ang / (Math.PI.toFloat() / 4f))
+        return ((idx % 8) + 8) % 8
     }
 
     // ---------------------------------------------------------------- toque
@@ -585,197 +1059,362 @@ class VirtualPadView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val index = event.actionIndex
-                if (!claim(event.getPointerId(index), event.getX(index), event.getY(index))) {
-                    // toque em área livre: não consome, cai para o SDL
-                    // (navega menus por toque mesmo com o HUD visível)
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) return false
+                val pid = event.getPointerId(index)
+                if (claim(pid, event.getX(index), event.getY(index))) {
+                    // Menor latência possível para o gesto que acabou de começar.
+                    requestUnbufferedDispatch(event)
+                    postInvalidateOnAnimation()
+                    return true
                 }
-                invalidate()
+                // toque em área livre: ACTION_DOWN não é consumido e cai para o
+                // SDL (navega menus por toque mesmo com o HUD visível).
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) return false
+                postInvalidateOnAnimation()
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
+                var dirty = false
                 for (i in 0 until event.pointerCount) {
-                    val id = event.getPointerId(i)
+                    val pid = event.getPointerId(i)
                     val x = event.getX(i)
                     val y = event.getY(i)
-                    if (leftStick.pointerId == id) updateStick(x, y)
-                    if (dpad.pointerId == id) updateDPad(x, y)
+                    when {
+                        togglePointerId == pid -> {
+                            // A decisão é no UP; deslizar para fora cancela.
+                            if (!toggleHit(x, y)) togglePointerId = -1
+                            dirty = true
+                        }
+                        stick.pointerId == pid -> {
+                            // Stick nunca solta por deslize: só UP/CANCEL.
+                            updateStick(x, y)
+                            dirty = true
+                        }
+                        dpad.pointerId == pid -> {
+                            if (dpad.exitZone(x, y)) {
+                                dpad.pointerId = -1
+                                dpad.hasAngle = false
+                                clearDPad()
+                            } else {
+                                updateDPad(x, y)
+                            }
+                            dirty = true
+                        }
+                        else -> {
+                            // Botões: histerese de saída mata "ghost press".
+                            for (b in roundButtons) {
+                                if (b.pointerId == pid && b.exitZone(x, y)) {
+                                    b.pointerId = -1
+                                    nativeButton(b.id, false)
+                                    dirty = true
+                                }
+                            }
+                            for (p in pills) {
+                                if (p.pointerId == pid && p.exitZone(x, y)) {
+                                    p.pointerId = -1
+                                    nativeButton(p.id, false)
+                                    dirty = true
+                                }
+                            }
+                        }
+                    }
                 }
-                invalidate()
+                if (dirty) postInvalidateOnAnimation()
                 return true
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                release(event.getPointerId(event.actionIndex))
-                invalidate()
+                releasePointer(event.getPointerId(event.actionIndex))
+                postInvalidateOnAnimation()
                 return true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                releaseAll(sendNative = true)
-                invalidate()
+                releaseAll()
+                postInvalidateOnAnimation()
                 return true
             }
         }
         return super.onTouchEvent(event)
     }
 
-    private fun claim(pointerId: Int, x: Float, y: Float): Boolean {
-        // botão de alternar HUD (funciona com o pad visível ou escondido)
-        if (toggleRect.contains(x, y)) {
-            haptic()
-            setPadVisible(!padVisible)
+    /**
+     * Tenta atribuir o ponteiro ao controle mais próximo (prioridade por
+     * proximidade entre hit-areas sobrepostas). Retorna true se consumiu.
+     */
+    private fun claim(pid: Int, x: Float, y: Float): Boolean {
+        if (togglePointerId == -1 && toggleHit(x, y)) {
+            // Decide no UP (cancelável deslizando para fora) — mesmo contrato
+            // de press dos demais controles; feedback vem no releasePointer.
+            togglePointerId = pid
             return true
         }
         if (!padVisible) return false
 
-        if (!leftStick.active && leftStick.hit(x, y)) {
-            leftStick.pointerId = pointerId
-            updateStick(x, y)
-            haptic()
-            return true
+        var bestKind = 0
+        var bestDist = Float.MAX_VALUE
+        var bestRound: RoundControl? = null
+        var bestPill: PillControl? = null
+
+        if (!stick.active && stick.hit(x, y)) {
+            val d = dist2(x, y, stick.cx, stick.cy)
+            if (d < bestDist) { bestDist = d; bestKind = 1 }
         }
         if (!dpad.pressed && dpad.hit(x, y)) {
-            dpad.pointerId = pointerId
-            updateDPad(x, y)
-            haptic()
-            return true
+            val d = dist2(x, y, dpad.cx, dpad.cy)
+            if (d < bestDist) { bestDist = d; bestKind = 2 }
         }
-        for (b in faceButtons) {
+        for (b in roundButtons) {
             if (!b.pressed && b.hit(x, y)) {
-                b.pointerId = pointerId
-                nativeButton(b.id, true)
-                haptic()
-                return true
+                val d = dist2(x, y, b.cx, b.cy)
+                if (d < bestDist) { bestDist = d; bestKind = 3; bestRound = b }
             }
         }
-        for (b in shoulders) {
-            if (!b.pressed && b.hit(x, y)) {
-                b.pointerId = pointerId
-                nativeButton(b.id, true)
-                haptic()
-                return true
+        for (p in pills) {
+            if (!p.pressed && p.hit(x, y)) {
+                val d = dist2(x, y, p.rect.centerX(), p.rect.centerY())
+                if (d < bestDist) { bestDist = d; bestKind = 4; bestPill = p }
             }
         }
-        return false
+
+        when (bestKind) {
+            1 -> {
+                stick.pointerId = pid
+                updateStick(x, y)
+                haptic(HapticFeedbackConstants.CLOCK_TICK)
+            }
+            2 -> {
+                dpad.pointerId = pid
+                updateDPad(x, y)
+                haptic(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+            3 -> {
+                val b = bestRound!!
+                b.pointerId = pid
+                nativeButton(b.id, true)
+                haptic(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+            4 -> {
+                val p = bestPill!!
+                p.pointerId = pid
+                nativeButton(p.id, true)
+                haptic(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+            else -> return false
+        }
+        return true
     }
 
-    private fun release(pointerId: Int) {
-        if (leftStick.pointerId == pointerId) {
-            leftStick.pointerId = -1
-            leftStick.dx = 0f
-            leftStick.dy = 0f
-            nativeAxis(0f, 0f)
+    /** Solta o controle atualmente dono do ponteiro informado (UP/POINTER_UP). */
+    private fun releasePointer(pid: Int) {
+        if (togglePointerId == pid) {
+            // Toque confirmado dentro do toggle: alterna o HUD com feedback.
+            togglePointerId = -1
+            toggleFlash = 1f
+            haptic(HapticFeedbackConstants.VIRTUAL_KEY)
+            setPadVisible(!padVisible)
+            return
         }
-        if (dpad.pointerId == pointerId) {
+        if (stick.pointerId == pid) {
+            val wasMoving = stick.sentX != 0f || stick.sentY != 0f
+            stick.pointerId = -1
+            stick.dx = 0f
+            stick.dy = 0f
+            stick.sentX = 0f
+            stick.sentY = 0f
+            lastStickTick = -1
+            if (wasMoving) nativeAxis(0f, 0f) // evita release duplicado
+            return
+        }
+        if (dpad.pointerId == pid) {
             dpad.pointerId = -1
+            dpad.hasAngle = false
             clearDPad()
+            return
         }
-        for (b in faceButtons) {
-            if (b.pointerId == pointerId) {
+        for (b in roundButtons) {
+            if (b.pointerId == pid) {
                 b.pointerId = -1
                 nativeButton(b.id, false)
+                return
             }
         }
-        for (b in shoulders) {
-            if (b.pointerId == pointerId) {
-                b.pointerId = -1
-                nativeButton(b.id, false)
+        for (p in pills) {
+            if (p.pointerId == pid) {
+                p.pointerId = -1
+                nativeButton(p.id, false)
+                return
             }
         }
     }
 
-    private fun releaseAll(sendNative: Boolean) {
-        if (sendNative) {
-            for (b in faceButtons) {
-                if (b.pressed) nativeButton(b.id, false)
-            }
-            for (b in shoulders) {
-                if (b.pressed) nativeButton(b.id, false)
-            }
-            if (leftStick.active || leftStick.dx != 0f || leftStick.dy != 0f) {
-                nativeAxis(0f, 0f)
-            }
-            if (dpad.pressed) releaseDPadNative()
+    /** Solta tudo (esconder HUD, fim do jogo, foco perdido, cancelamento). */
+    private fun releaseAll() {
+        for (b in roundButtons) {
+            if (b.pressed) nativeButton(b.id, false)
         }
-        leftStick.pointerId = -1
-        leftStick.dx = 0f
-        leftStick.dy = 0f
+        for (p in pills) {
+            if (p.pressed) nativeButton(p.id, false)
+        }
+        if (stick.sentX != 0f || stick.sentY != 0f) nativeAxis(0f, 0f)
+        if (dpad.pressed || dpad.anyDir) clearDPad()
+        stick.pointerId = -1
+        stick.dx = 0f
+        stick.dy = 0f
+        stick.sentX = 0f
+        stick.sentY = 0f
+        lastStickTick = -1
         dpad.pointerId = -1
-        dpad.clear()
-        for (b in faceButtons) b.pointerId = -1
-        for (b in shoulders) b.pointerId = -1
+        dpad.hasAngle = false
+        dpad.up = false
+        dpad.down = false
+        dpad.left = false
+        dpad.right = false
+        for (b in roundButtons) b.pointerId = -1
+        for (p in pills) p.pointerId = -1
+        togglePointerId = -1
     }
 
+    /**
+     * Vetor do stick: bruto (clamp ao círculo unitário) para o knob; para o
+     * N64 aplica +y para cima, zona morta radial COM reescala ((v-dz)/(1-dz))
+     * e envia ao nativo a cada movimento.
+     */
     private fun updateStick(x: Float, y: Float) {
-        var ddx = (x - leftStick.cx) / leftStick.outerR
-        var ddy = (y - leftStick.cy) / leftStick.outerR
-        val mag = hypot(ddx.toDouble(), ddy.toDouble()).toFloat()
+        val s = stick
+        if (s.outerR <= 0f) return // sem layout ainda: evita NaN
+        var ddx = (x - s.cx) / s.outerR
+        var ddy = (y - s.cy) / s.outerR
+        val mag = hypot(ddx, ddy)
         if (mag > 1f) {
             ddx /= mag
             ddy /= mag
         }
-        leftStick.dx = ddx
-        leftStick.dy = ddy
+        s.dx = ddx
+        s.dy = ddy
 
-        // Converte para o espaço do N64: +y para cima (inverte o eixo da tela),
-        // aplica zona morta radial e envia ao nativo.
         var ax = ddx
         var ay = -ddy
-        val aMag = hypot(ax.toDouble(), ay.toDouble()).toFloat()
+        val aMag = hypot(ax, ay)
         if (aMag <= STICK_DEADZONE) {
             ax = 0f
             ay = 0f
-        } else if (aMag > 1f) {
-            ax /= aMag
-            ay /= aMag
+            lastStickTick = -1
+        } else {
+            val scaled = min((aMag - STICK_DEADZONE) / (1f - STICK_DEADZONE), 1f)
+            ax = ax / aMag * scaled
+            ay = ay / aMag * scaled
+            stickTickHaptic(nearestTickIndex(ddx, ddy))
         }
         nativeAxis(ax, ay)
+        s.sentX = ax
+        s.sentY = ay
     }
 
+    /** CLOCK_TICK ao cruzar setores do stick, com cooldown curto. */
+    private fun stickTickHaptic(idx: Int) {
+        if (idx == -1 || idx == lastStickTick) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastTickHapticAt < 60L) return
+        lastTickHapticAt = now
+        lastStickTick = idx
+        haptic(HapticFeedbackConstants.CLOCK_TICK)
+    }
+
+    /**
+     * D-pad de 8 direções: setor angular de 45° com histerese (~12°) contra
+     * tremor no limite do setor; diagonais acionam dois botões; só envia ao
+     * nativo quando o estado muda.
+     */
     private fun updateDPad(x: Float, y: Float) {
-        val ddx = x - dpad.cx
-        val ddy = y - dpad.cy
-        val dead = dpad.armWidth * 0.45f
-        val was = "${dpad.up}${dpad.down}${dpad.left}${dpad.right}"
-        dpad.clear()
-        if (abs(ddx) > dead || abs(ddy) > dead) {
-            if (abs(ddx) > abs(ddy) * 0.45f) {
-                if (ddx > 0) dpad.right = true else dpad.left = true
-            }
-            if (abs(ddy) > abs(ddx) * 0.45f) {
-                if (ddy > 0) dpad.down = true else dpad.up = true
-            }
+        val d = dpad
+        val dxv = x - d.cx
+        val dyv = y - d.cy
+        val mag = hypot(dxv, dyv)
+        if (mag < d.arm * 0.5f) {
+            // Voltou ao centro: solta a direção (gesto natural de "soltar");
+            // a faixa entre 0.5×arm e 0.9×arm é de retenção (anti-tremor).
+            if (d.anyDir) clearDPad()
+            d.hasAngle = false // histerese angular não herda o gesto anterior
+            return
         }
-        val now = "${dpad.up}${dpad.down}${dpad.left}${dpad.right}"
-        if (was != now) {
-            val wasUp = was[0] == 't'; val wasDown = was[1] == 't'
-            val wasLeft = was[2] == 't'; val wasRight = was[3] == 't'
-            if (dpad.up != wasUp) nativeButton(BTN_DPAD_UP, dpad.up)
-            if (dpad.down != wasDown) nativeButton(BTN_DPAD_DOWN, dpad.down)
-            if (dpad.left != wasLeft) nativeButton(BTN_DPAD_LEFT, dpad.left)
-            if (dpad.right != wasRight) nativeButton(BTN_DPAD_RIGHT, dpad.right)
-            haptic()
+        if (mag < d.arm * DPAD_MIN_RADIUS) return
+
+        var ang = atan2(dyv, dxv)
+        if (d.hasAngle) {
+            val diff = wrapPi(ang - d.lastAng)
+            if (abs(diff) < DPAD_ANGLE_HYST_RAD) ang = d.lastAng else d.lastAng = ang
+        } else {
+            d.hasAngle = true
+            d.lastAng = ang
+        }
+
+        val sector = Math.round(ang / (Math.PI.toFloat() / 4f))
+        var up = false
+        var down = false
+        var left = false
+        var right = false
+        when (sector) {
+            0 -> right = true
+            1 -> { right = true; down = true }
+            2 -> down = true
+            3 -> { down = true; left = true }
+            4, -4 -> left = true
+            -3 -> { left = true; up = true }
+            -2 -> up = true
+            -1 -> { up = true; right = true }
+        }
+
+        if (up != d.up || down != d.down || left != d.left || right != d.right) {
+            if (up != d.up) nativeButton(BTN_DPAD_UP, up)
+            if (down != d.down) nativeButton(BTN_DPAD_DOWN, down)
+            if (left != d.left) nativeButton(BTN_DPAD_LEFT, left)
+            if (right != d.right) nativeButton(BTN_DPAD_RIGHT, right)
+            d.up = up
+            d.down = down
+            d.left = left
+            d.right = right
+            haptic(HapticFeedbackConstants.CLOCK_TICK)
         }
     }
 
     private fun clearDPad() {
-        releaseDPadNative()
-        dpad.clear()
+        val d = dpad
+        if (d.up) nativeButton(BTN_DPAD_UP, false)
+        if (d.down) nativeButton(BTN_DPAD_DOWN, false)
+        if (d.left) nativeButton(BTN_DPAD_LEFT, false)
+        if (d.right) nativeButton(BTN_DPAD_RIGHT, false)
+        d.up = false
+        d.down = false
+        d.left = false
+        d.right = false
     }
 
-    private fun releaseDPadNative() {
-        if (dpad.up) nativeButton(BTN_DPAD_UP, false)
-        if (dpad.down) nativeButton(BTN_DPAD_DOWN, false)
-        if (dpad.left) nativeButton(BTN_DPAD_LEFT, false)
-        if (dpad.right) nativeButton(BTN_DPAD_RIGHT, false)
+    private fun toggleHit(x: Float, y: Float): Boolean {
+        val dx = x - toggleX
+        val dy = y - toggleY
+        return dx * dx + dy * dy <= toggleHitR * toggleHitR
     }
 
-    private fun haptic() {
-        performHapticFeedback(
-            HapticFeedbackConstants.VIRTUAL_KEY,
-            HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
-        )
+    private fun dist2(x: Float, y: Float, cx: Float, cy: Float): Float {
+        val dx = x - cx
+        val dy = y - cy
+        return dx * dx + dy * dy
+    }
+
+    /** Normaliza o ângulo para (-pi, pi]. */
+    private fun wrapPi(a: Float): Float {
+        val twoPi = (2.0 * Math.PI).toFloat()
+        var r = a % twoPi
+        val pi = Math.PI.toFloat()
+        if (r > pi) r -= twoPi
+        if (r < -pi) r += twoPi
+        return r
+    }
+
+    // --------------------------------------------------------------- haptics
+    /** Respeita a preferência global de feedback de toque (acessibilidade). */
+    private fun haptic(constant: Int) {
+        performHapticFeedback(constant)
     }
 }

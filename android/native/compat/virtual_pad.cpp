@@ -70,6 +70,7 @@ struct VirtualPadState {
     std::atomic<float> stick_x{0.0f};
     std::atomic<float> stick_y{0.0f};
     std::atomic<bool> bridge_ready{false};
+    std::atomic<bool> game_started{false};
 
     // Cache JNI para o callback onGameStarted.
     JavaVM* vm = nullptr;
@@ -254,12 +255,21 @@ void merge_input(int controller_num, uint16_t* buttons, float* x, float* y) {
 }
 
 void notify_game_started(bool game_started) {
+    // Guarda o estado atual: o overlay consulta is_game_started() no init para
+    // se auto-recuperar quando a Activity é recriada com o jogo rodando
+    // (caso em que a transição abaixo não re-dispara).
+    state().game_started.store(game_started, std::memory_order_relaxed);
+
     static std::atomic<bool> last_state{false};
     bool prev = last_state.exchange(game_started, std::memory_order_relaxed);
     if (prev != game_started && state().bridge_ready.load(std::memory_order_acquire)) {
         VP_LOG("jogo %s -> notificando overlay", game_started ? "iniciado" : "encerrado");
         call_java_game_started(game_started);
     }
+}
+
+bool is_game_started() {
+    return state().game_started.load(std::memory_order_relaxed);
 }
 
 void shutdown_jni() {
@@ -292,6 +302,11 @@ Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeButton(JNIEnv*, jobject, ji
 VP_JNI void JNICALL
 Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeAxis(JNIEnv*, jobject, jfloat x, jfloat y) {
     androidport::virtualpad::set_stick(static_cast<float>(x), static_cast<float>(y));
+}
+
+VP_JNI jboolean JNICALL
+Java_com_deivid22srk_dk64recomp_VirtualPadView_nativeIsGameStarted(JNIEnv*, jobject) {
+    return androidport::virtualpad::is_game_started() ? JNI_TRUE : JNI_FALSE;
 }
 
 #endif // __ANDROID__

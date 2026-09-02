@@ -68,6 +68,10 @@ void merge_input(int controller_num, uint16_t* buttons, float* x, float* y);
 // Chamado pelo wrapper de `poll_input` em main.cpp.
 void notify_game_started(bool game_started);
 
+// Estado atual do jogo (consultável pelo overlay na recriação da Activity,
+// quando a transição em notify_game_started não re-dispara).
+bool is_game_started();
+
 // Libera as refs globais JNI (chamado no fim do main; opcional/inofensivo).
 void shutdown_jni();
 
