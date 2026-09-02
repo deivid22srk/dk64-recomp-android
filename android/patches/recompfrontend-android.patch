@@ -87,8 +87,38 @@ index 277a421..ae5a247 100644
      SDL_Event cur_event{};
  
      bool mouse_moved = false;
+diff --git a/recompui/src/composites/ui_mod_menu.cpp b/recompui/src/composites/ui_mod_menu.cpp
+index 19f761c..5918e23 100644
+--- a/recompui/src/composites/ui_mod_menu.cpp
++++ b/recompui/src/composites/ui_mod_menu.cpp
+@@ -12,6 +12,11 @@
+ 
+ #include <string>
+ 
++#if defined(__ANDROID__)
++// Port Android: pasta mods / seletor de mods via ponte SAF (file_bridge).
++#include "file_bridge.h"
++#endif
++
+ #ifdef WIN32
+ #include <shellapi.h>
+ #endif
+@@ -292,6 +297,13 @@ void ModMenu::open_mods_folder() {
+ #if defined(WIN32)
+     std::wstring path_wstr = mods_directory.wstring();
+     ShellExecuteW(NULL, L"open", path_wstr.c_str(), NULL, NULL, SW_SHOWDEFAULT);
++#elif defined(__ANDROID__)
++    // Port Android: não há xdg-open — abre o gerenciador de arquivos do
++    // sistema na pasta mods do app (ACTION_OPEN_DOCUMENT_TREE com
++    // EXTRA_INITIAL_URI, via file_bridge). O resultado só libera o slot.
++    (void)mods_directory;
++    androidport::filedialog::request(androidport::filedialog::Kind::ModsFolder,
++        [](bool /*ok*/, const std::string& /*payload*/) {});
+ #elif defined(__linux__)
+     std::string command = "xdg-open \"" + mods_directory.string() + "\" &";
+     std::system(command.c_str());
 diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
-index 7ee84ed..6de9ac0 100644
+index 7ee84ed..a101344 100644
 --- a/recompui/src/util/file.cpp
 +++ b/recompui/src/util/file.cpp
 @@ -12,6 +12,9 @@
@@ -168,13 +198,36 @@ index 7ee84ed..6de9ac0 100644
          file::apple::dispatch_on_ui_thread([callback]() {
              perform_file_dialog_operation(callback);
          });
-@@ -139,7 +166,9 @@ namespace recompui {
+@@ -139,7 +166,32 @@ namespace recompui {
      }
  
      void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
 -#ifdef __APPLE__
 +#if defined(__ANDROID__)
-+        callback(false, {});
++        // Port Android: sem NFD — abre o seletor SAF do Android (DocumentsUI)
++        // com seleção MÚLTIPLA para instalar mods (.nrm/.rtz/zip de pacote).
++        // O Java copia os arquivos para o filesDir/mods_staging e publica os
++        // caminhos no payload separados por '\n' (contrato do file_bridge.h);
++        // aqui dividimos o payload e entregamos a lista ao ModInstaller
++        // (drop_files), exatamente como o retorno do NFD no desktop.
++        androidport::filedialog::request(androidport::filedialog::Kind::ModFile,
++            [callback](bool ok, const std::string& payload) {
++                std::list<std::filesystem::path> paths;
++                if (ok && !payload.empty()) {
++                    size_t start = 0;
++                    while (start <= payload.size()) {
++                        size_t end = payload.find('\n', start);
++                        size_t count = (end == std::string::npos) ? payload.size() - start : end - start;
++                        std::string part = payload.substr(start, count);
++                        if (!part.empty()) {
++                            paths.emplace_back(part);
++                        }
++                        if (end == std::string::npos) break;
++                        start = end + 1;
++                    }
++                }
++                callback(ok && !paths.empty(), paths);
++            });
 +#elif defined(__APPLE__)
          file::apple::dispatch_on_ui_thread([callback]() {
              perform_file_dialog_operation_multiple(callback);

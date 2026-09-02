@@ -60,9 +60,15 @@ public class MainActivity extends SDLActivity {
     private static final int KIND_ROM = 0;
     /** Kind::DriverZip do file_bridge.h — mantenha em sincronia. */
     private static final int KIND_DRIVER = 1;
+    /** Kind::ModFile do file_bridge.h — mods .nrm/.rtz, seleção MÚLTIPLA. */
+    private static final int KIND_MOD = 2;
+    /** Kind::ModsFolder do file_bridge.h — abre a pasta mods no gerenciador. */
+    private static final int KIND_MODS_FOLDER = 3;
 
     private static final int PICK_ROM_REQUEST = 0xD864;
     private static final int PICK_DRIVER_REQUEST = 0xADF1;
+    private static final int PICK_MOD_REQUEST = 0x4D0D;
+    private static final int PICK_MODS_FOLDER_REQUEST = 0xFA7D;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -209,18 +215,57 @@ public class MainActivity extends SDLActivity {
         switch (requestCode) {
             case PICK_ROM_REQUEST: kind = KIND_ROM; break;
             case PICK_DRIVER_REQUEST: kind = KIND_DRIVER; break;
+            case PICK_MOD_REQUEST: kind = KIND_MOD; break;
+            case PICK_MODS_FOLDER_REQUEST: {
+                // A pasta mods foi apenas exibida no gerenciador do sistema
+                // (ACTION_OPEN_DOCUMENT_TREE): nada a processar, publica o
+                // resultado para liberar o slot do file_bridge.
+                try {
+                    nativeOnFilePicked(KIND_MODS_FOLDER, true, "Mods folder opened.");
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e(TAG, "nativeOnFilePicked indisponível: " + e.getMessage());
+                }
+                return;
+            }
             default: return; // (HID do SDLActivity já foi tratado pelo super)
         }
 
-        final Uri uri = (resultCode == RESULT_OK && data != null && data.getData() != null)
-                ? data.getData() : null;
+        // Mods aceitam seleção múltipla (EXTRA_ALLOW_MULTIPLE): ClipData traz
+        // todos os Uris; um único item chega por getData() (comportamento
+        // idêntico em ACTION_OPEN_DOCUMENT com e sem múltipla escolha).
+        final java.util.List<Uri> uris = new java.util.ArrayList<>();
+        if (resultCode == RESULT_OK && data != null) {
+            if (data.getClipData() != null) {
+                android.content.ClipData clip = data.getClipData();
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri u = clip.getItemAt(i).getUri();
+                    if (u != null) uris.add(u);
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+        }
+
+        final Uri uri = uris.size() == 1 ? uris.get(0) : null;
         final Context appContext = getApplicationContext();
         new Thread(() -> {
             boolean ok = false;
             String payload;
             try {
-                if (uri == null) {
+                if (uris.isEmpty()) {
                     payload = "No file selected."; // cancelamento: o menu só ignora
+                } else if (kind == KIND_MOD) {
+                    // Copia cada mod (.nrm/.rtz/zip) para o staging e devolve os
+                    // caminhos separados por '\n' (contrato do file_bridge.h).
+                    SafFiles.clearModsStaging(appContext);
+                    StringBuilder sb = new StringBuilder();
+                    for (Uri u : uris) {
+                        String path = SafFiles.copyModToModsStaging(appContext, u);
+                        if (sb.length() > 0) sb.append('\n');
+                        sb.append(path);
+                    }
+                    payload = sb.toString();
+                    ok = true;
                 } else if (kind == KIND_ROM) {
                     payload = SafFiles.copyRomToFilesDir(appContext, uri);
                     ok = true;
@@ -272,11 +317,38 @@ public class MainActivity extends SDLActivity {
         }
         activity.runOnUiThread(() -> {
             try {
-                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("*/*"); // ROMs/drivers chegam como octet-stream/zip
-                activity.startActivityForResult(intent,
-                        kind == KIND_ROM ? PICK_ROM_REQUEST : PICK_DRIVER_REQUEST);
+                Intent intent;
+                final int requestCode;
+                switch (kind) {
+                    case KIND_MODS_FOLDER:
+                        // Abre o gerenciador de arquivos do sistema NA pasta mods
+                        // do app (EXTRA_INITIAL_URI, API 26+ = minSdk). O usuário
+                        // navega livremente; o resultado só libera o slot.
+                        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                        intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                                android.provider.DocumentsContract.buildDocumentUri(
+                                        "com.android.externalstorage.documents",
+                                        "primary:Android/data/"
+                                                + activity.getPackageName()
+                                                + "/files/mods"));
+                        requestCode = PICK_MODS_FOLDER_REQUEST;
+                        break;
+                    case KIND_MOD:
+                        // Instalação de mods: seleção MÚLTIPLA de .nrm/.rtz/zip.
+                        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("*/*"); // .nrm/.rtz não têm MIME registrado
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                        requestCode = PICK_MOD_REQUEST;
+                        break;
+                    default:
+                        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("*/*"); // ROMs/drivers chegam como octet-stream/zip
+                        requestCode = kind == KIND_ROM ? PICK_ROM_REQUEST : PICK_DRIVER_REQUEST;
+                        break;
+                }
+                activity.startActivityForResult(intent, requestCode);
             } catch (Exception e) {
                 Log.e(TAG, "Falha ao abrir o seletor SAF", e);
                 // Libera o slot no nativo e mostra o erro no menu do jogo.

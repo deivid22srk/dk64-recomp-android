@@ -42,6 +42,20 @@ namespace androidport::filedialog {
 enum class Kind {
     Rom = 0,       // .z64/.n64/.v64 — copiado para o filesDir e validado pelo select_rom
     DriverZip = 1, // .zip/.so de driver Turnip — instalado pelo GpuDriverInstaller (Java)
+    /*
+     * Mods (.nrm/.rtz, seleção MÚLTIPLA no SAF): o Java copia cada arquivo
+     * para filesDir/mods_staging e publica os caminhos no payload separados
+     * por '\n' (nomes são sanitizados no Java — nenhum caminho contém '\n').
+     * O consumidor (recompui::file::open_file_dialog_multiple, patch do
+     * RecompFrontend) divide o payload e entrega ao ModInstaller.
+     */
+    ModFile = 2,
+    /*
+     * Abre a pasta mods (filesDir/mods) no gerenciador de arquivos do sistema
+     * (ACTION_OPEN_DOCUMENT_TREE + EXTRA_INITIAL_URI). Não produz dado útil:
+     * o resultado só libera o slot (ok=true quando o usuário retorna).
+     */
+    ModsFolder = 3,
 };
 
 using Callback = std::function<void(bool ok, const std::string& payload)>;
@@ -74,7 +88,7 @@ void set_java_vm(void *vm);
 // Call sites compilam em desktop sem guards: tudo vira no-op/false.
 #include <cstdlib>
 namespace androidport::filedialog {
-enum class Kind { Rom = 0, DriverZip = 1 };
+enum class Kind { Rom = 0, DriverZip = 1, ModFile = 2, ModsFolder = 3 };
 using Callback = std::function<void(bool ok, const std::string& payload)>;
 inline bool request(Kind, Callback callback) {
     if (callback) callback(false, std::string{});

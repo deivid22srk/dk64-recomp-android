@@ -276,7 +276,8 @@ endforeach()
 if(TARGET plume)
     target_include_directories(plume PRIVATE ${SDL2_ALL_INCLUDES})
 endif()
-# Patch do RecompFrontend (file.cpp) usa android_paths.h
+# Patch do RecompFrontend (file.cpp, ui_mod_menu.cpp) usa android_paths.h e
+# file_bridge.h (seletor SAF de ROM/driver/mods + pasta mods no gerenciador).
 if(TARGET recompui)
     target_include_directories(recompui PRIVATE "${ANDROID_PORT_DIR}/native/compat")
 endif()

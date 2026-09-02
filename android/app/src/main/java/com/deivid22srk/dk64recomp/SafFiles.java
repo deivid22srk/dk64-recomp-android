@@ -29,6 +29,92 @@ final class SafFiles {
     /** ROM NTSC-U: 32 MiB; margem p/ covers/headers e versões truncadas. */
     private static final long MAX_ROM_BYTES = 64L * 1024 * 1024;
 
+    /**
+     * Mods (.nrm/.rtz e zips de pacotes) podem ser bem maiores que uma ROM
+     * (texture packs); 512 MiB cobre qualquer mod razoável e ainda protege
+     * contra escolhas acidentais de arquivos gigantes.
+     */
+    private static final long MAX_MOD_BYTES = 512L * 1024 * 1024;
+
+    /** Diretório de staging para mods escolhidos no SAF (filesDir/mods_staging). */
+    private static File modsStagingDir(Context ctx) {
+        return new File(ctx.getFilesDir(), "mods_staging");
+    }
+
+    /**
+     * Limpa o staging de mods. Chamado ANTES de cada sessão de cópia: os
+     * caminhos de staging são entregues ao ModInstaller, que COPIA para a
+     * pasta mods definitiva — sobrar arquivos antigos aqui só desperdiça
+     * espaço (o installer nunca lê o staging fora da sessão atual).
+     */
+    static void clearModsStaging(Context ctx) {
+        File dir = modsStagingDir(ctx);
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
+    }
+
+    /**
+     * Copia um mod escolhido no SAF para o staging (filesDir/mods_staging),
+     * preservando o nome real do arquivo — o ModInstaller valida o conteúdo
+     * (.nrm/.rtz/zip com manifest) e mostra erro claro se não for um mod.
+     *
+     * Diferente da ROM, NADA é renomeado aqui: .nrm/.rtz são extensões
+     * significativas para o instalador (container de mod vs texture pack) e
+     * zips de pacote são escaneados em busca de mods internos.
+     *
+     * @return caminho absoluto do arquivo copiado (legível pelo nativo).
+     */
+    static String copyModToModsStaging(Context ctx, Uri uri) throws IOException, SecurityException {
+        String name = queryDisplayName(ctx, uri);
+        if (name == null) name = "mod";
+        // Sanitiza: sem diretórios e sem caracteres de controle — o payload
+        // do file_bridge usa '\n' como delimitador entre caminhos.
+        name = name.substring(name.lastIndexOf('/') + 1).trim().replaceAll("[\\x00-\\x1f]", "_");
+        if (name.isEmpty()) name = "mod";
+
+        File dir = modsStagingDir(ctx);
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IOException("Não foi possível criar o diretório de staging de mods.");
+        }
+
+        File dest = new File(dir, name);
+        // Cópia atômica: grava em .tmp e renomeia — evita mod parcial.
+        File tmp = new File(dir, name + ".tmp");
+        try {
+            try (InputStream in = ctx.getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(tmp)) {
+                if (in == null) throw new IOException("Não foi possível abrir o arquivo selecionado.");
+                byte[] buf = new byte[1 << 16];
+                long total = 0;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    total += n;
+                    if (total > MAX_MOD_BYTES) throw new IOException("Arquivo maior que 512 MB.");
+                    out.write(buf, 0, n);
+                }
+            }
+            if (!tmp.renameTo(dest)) {
+                // fallback raro (rename entre filesystems): cópia direta
+                try (InputStream in = new java.io.FileInputStream(tmp);
+                     OutputStream out = new FileOutputStream(dest)) {
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                }
+                tmp.delete();
+            }
+        } finally {
+            tmp.delete(); // limpa resíduo em qualquer falha (rename OK = no-op)
+        }
+        Log.i(TAG, "Mod copiado para " + dest.getAbsolutePath());
+        return dest.getAbsolutePath();
+    }
+
     private SafFiles() {}
 
     /** Nome de exibição do Uri (OpenableColumns.DISPLAY_NAME) ou fallback. */
