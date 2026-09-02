@@ -58,9 +58,12 @@ public final class DiagnosticsLogger {
     private static final String PREFS = "dk64_diagnostics";
     private static final String PREF_ENABLED = "enabled";
 
-    /** Captura ATIVA por padrão: o objetivo é nunca perder o log de um
-     *  problema inesperado; o custo é um thread de leitura + I/O de texto. */
-    private static final boolean DEFAULT_ENABLED = true;
+    /** Captura DESATIVADA por padrão (pedido do usuário): nada é registrado
+     *  até que o usuário ligue a captura nas Configurações do app — menu do
+     *  jogo -> "Logs de diagnóstico" (ou long-press no ícone -> shortcut).
+     *  Ao ligar, a sessão começa NA HORA (setEnabled inicia a sessão); não
+     *  é preciso reabrir o app. */
+    private static final boolean DEFAULT_ENABLED = false;
 
     private static final int KEEP_FILES = 5;
     private static final long MAX_FILE_BYTES = 8L * 1024 * 1024;

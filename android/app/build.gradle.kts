@@ -17,8 +17,8 @@ android {
         applicationId = "com.deivid22srk.dk64recomp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.2-android"
+        versionCode = 3
+        versionName = "1.0.3-android"
 
         ndk {
             // 64-bit apenas (decisão do usuário: memória e tempo de build)

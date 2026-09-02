@@ -27,8 +27,11 @@ import java.util.List;
  *    ACTION_SEND + provider content:// próprio (sem AndroidX);
  *  - long-press em um log antigo = apagar.
  *
- * Como chegar aqui: long-press no ícone do app no launcher -> "Logs de
- * diagnóstico" (shortcut estático em res/xml/shortcuts.xml).
+ * Como chegar aqui (duas entradas):
+ *  - Configurações do app: menu do jogo (launcher) -> "Logs de diagnóstico"
+ *    (GameOption que abre esta tela via file_bridge/JNI);
+ *  - long-press no ícone do app no launcher -> "Logs de diagnóstico"
+ *    (shortcut estático em res/xml/shortcuts.xml).
  *
  * UI 100% programática: o app é deliberadamente sem AndroidX e com uma
  * activity só; para uma tela utilitária como esta, código direto evita
@@ -61,12 +64,14 @@ public class DiagnosticsActivity extends Activity {
 
         // Explicação
         TextView expl = label(
-                "Com a captura ATIVADA, todo o log do jogo é registrado em um arquivo "
-                        + "(áudio, renderização Vulkan/RT64, driver, ciclo de vida e crashes), "
-                        + "linha a linha. Se o app fechar à força ou crashear, o que foi "
-                        + "registrado até ali permanece salvo, e cada sessão termina com um "
-                        + "RESUMO dos erros e avisos mais frequentes — deixando claro onde "
-                        + "está o problema.\n\n"
+                "A captura vem DESATIVADA por padrão — ligue o interruptor "
+                        + "abaixo para começar a capturar AGORA (não precisa reabrir "
+                        + "o app). Com a captura ATIVADA, todo o log do jogo é registrado "
+                        + "em um arquivo (áudio, renderização Vulkan/RT64, driver, ciclo "
+                        + "de vida e crashes), linha a linha. Se o app fechar à força ou "
+                        + "crashear, o que foi registrado até ali permanece salvo, e cada "
+                        + "sessão termina com um RESUMO dos erros e avisos mais frequentes "
+                        + "— deixando claro onde está o problema.\n\n"
                         + "Os arquivos ficam em: Android/data/" + getPackageName()
                         + "/files/diagnostics (ou no armazenamento interno do app, se o "
                         + "externo não estiver disponível).",

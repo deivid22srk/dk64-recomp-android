@@ -317,6 +317,34 @@ public class MainActivity extends SDLActivity {
         return true;
     }
 
+    /**
+     * Chamado via JNI pela thread de render (file_bridge.cpp) a partir da
+     * opção "Logs de diagnóstico" do menu launcher do jogo (Configurações do
+     * app). Abre a DiagnosticsActivity na MESMA task (voltar fecha a tela e
+     * retorna ao jogo) — o ciclo onPause/onResume que isso dispara já é
+     * coberto pelo congelamento da present queue (app_lifecycle), exatamente
+     * como no seletor SAF.
+     *
+     * Fire-and-forget: sem slot no nativo e sem resultado de volta — só
+     * posta o Intent e devolve. Falso = ponte indisponível (não bloqueia o
+     * menu; o usuário ainda tem o shortcut do long-press no ícone).
+     */
+    public static boolean openDiagnosticsScreen() {
+        final Activity activity = mSingleton;
+        if (activity == null || activity.isFinishing()) {
+            Log.e(TAG, "openDiagnosticsScreen: Activity indisponível");
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            try {
+                activity.startActivity(new Intent(activity, DiagnosticsActivity.class));
+            } catch (Exception e) {
+                Log.e(TAG, "Falha ao abrir a tela de diagnóstico", e);
+            }
+        });
+        return true;
+    }
+
     /** Injeta o nativeLibraryDir no nativo cedo (implementado em custom_driver.cpp).
      *  Garante o hookLibDir exato exigido pelo adrenotools em TODA sessão —
      *  o scan de /proc/self/maps passa a ser apenas rede de segurança. O
