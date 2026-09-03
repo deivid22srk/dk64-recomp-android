@@ -1,5 +1,7 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 79dfc38..f0fc14d 100644
+old mode 100644
+new mode 100755
+index 79dfc38..9a8487b
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -58,7 +58,10 @@ elseif (APPLE)
@@ -63,7 +65,18 @@ index 79dfc38..f0fc14d 100644
  
  # Add any Apple-specific source files and libraries
  if (APPLE)
-@@ -507,6 +536,10 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
+@@ -504,9 +533,21 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
++# Port DK64-Recomp Android: permutations that avoid dual source blending for
++# drivers where pipeline creation fails when the blend state references the
++# secondary source (proprietary Qualcomm Adreno). The blend factor moves into
++# output 0's alpha channel and the pipeline uses standard SRC_ALPHA blending.
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantNoDualSource.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D RASTER_PS_NO_DUAL_SOURCE")
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantNoDualSourceMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" "-D RASTER_PS_NO_DUAL_SOURCE")
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatNoDualSource.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D RASTER_PS_NO_DUAL_SOURCE")
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatNoDualSourceMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" "-D RASTER_PS_NO_DUAL_SOURCE")
  build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
  build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
  build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
@@ -165,7 +178,9 @@ index 08f83e5..6347b98 100755
          XWindowAttributes attributes;
          XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 3227ab1..b41e64b 100644
+old mode 100644
+new mode 100755
+index 3227ab1..b41e64b
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
 @@ -7,6 +7,13 @@
@@ -239,7 +254,9 @@ index 3227ab1..b41e64b 100644
                  std::unique_lock<std::mutex> threadLock(threadMutex);
                  const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index 9fae0d4..c369ea3 100644
+old mode 100644
+new mode 100755
+index 9fae0d4..c369ea3
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
 @@ -543,7 +543,14 @@ namespace RT64 {
@@ -317,10 +334,19 @@ index 9fae0d4..c369ea3 100644
                          
                          triangles.faceCount = call.callDesc.triangleCount;
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
-index 721a01e..ad2414c 100644
+old mode 100644
+new mode 100755
+index 721a01e..87be575
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
-@@ -16,6 +16,8 @@
+@@ -13,9 +13,15 @@
+ #include "shaders/RasterPSSpecConstantMS.hlsl.spirv.h"
+ #include "shaders/RasterPSSpecConstantFlat.hlsl.spirv.h"
+ #include "shaders/RasterPSSpecConstantFlatMS.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantNoDualSource.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantNoDualSourceMS.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantFlatNoDualSource.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantFlatNoDualSourceMS.hlsl.spirv.h"
  #include "shaders/RasterVSDynamic.hlsl.spirv.h"
  #include "shaders/RasterVSSpecConstant.hlsl.spirv.h"
  #include "shaders/RasterVSSpecConstantFlat.hlsl.spirv.h"
@@ -329,7 +355,7 @@ index 721a01e..ad2414c 100644
  #include "shaders/PostBlendDitherNoiseAddPS.hlsl.spirv.h"
  #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
  #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
-@@ -45,6 +47,9 @@
+@@ -45,6 +51,9 @@
  #endif
  #include "shared/rt64_raster_params.h"
  
@@ -339,7 +365,7 @@ index 721a01e..ad2414c 100644
  #include "rt64_descriptor_sets.h"
  #include "rt64_render_target.h"
  
-@@ -65,6 +70,109 @@ namespace RT64 {
+@@ -65,6 +74,123 @@ namespace RT64 {
          RenderInputElement("COLOR", 0, 2, RasterColorFormat, 2, 0)
      };
  
@@ -366,6 +392,20 @@ index 721a01e..ad2414c 100644
 +
 +    static bool g_FlatShadingSupported = true;
 +    static bool g_FlatShadingSupportDetected = false;
++
++    // Port DK64-Recomp Android: dual source blending compatibility. The proprietary
++    // Qualcomm drivers of the Adreno 6xx family fail the creation of any graphics
++    // pipeline whose blend state references the secondary source (SRC1_ALPHA /
++    // INV_SRC1_ALPHA): the driver logs "Failed to link shaders." and
++    // vkCreateGraphicsPipelines returns VK_ERROR_UNKNOWN, even though the very same
++    // shader pair links fine when the blend state doesn't reference SRC1. Every
++    // alpha blended raster shader of the smooth shaded family hits exactly that
++    // path on such drivers, which left the game with no visible geometry after the
++    // boot logo. When the driver reports the capability as unreliable (see
++    // RasterShader::detectFlatShadingSupport), the pixel shaders built from the
++    // RASTER_PS_NO_DUAL_SOURCE permutations fold the blend factor into output 0's
++    // alpha channel and the pipelines use standard SRC_ALPHA blending instead.
++    static bool g_DualSourceBlendSupported = true;
 +
 +    // Removes every "OpDecorate ... Flat" instruction from a SPIR-V module.
 +    // Returns false (and leaves outData cleared) if the module is malformed.
@@ -449,7 +489,25 @@ index 721a01e..ad2414c 100644
      // OptimizerCacheSPIRV
  
      void OptimizerCacheSPIRV::initialize() {
-@@ -84,6 +192,69 @@ namespace RT64 {
+@@ -74,16 +200,98 @@ namespace RT64 {
+         rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
+         rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
+         rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
++        rasterPSNoDualSource.parse(RasterPSSpecConstantNoDualSourceBlobSPIRV, std::size(RasterPSSpecConstantNoDualSourceBlobSPIRV));
++        rasterPSNoDualSourceMS.parse(RasterPSSpecConstantNoDualSourceMSBlobSPIRV, std::size(RasterPSSpecConstantNoDualSourceMSBlobSPIRV));
++        rasterPSFlatNoDualSource.parse(RasterPSSpecConstantFlatNoDualSourceBlobSPIRV, std::size(RasterPSSpecConstantFlatNoDualSourceBlobSPIRV));
++        rasterPSFlatNoDualSourceMS.parse(RasterPSSpecConstantFlatNoDualSourceMSBlobSPIRV, std::size(RasterPSSpecConstantFlatNoDualSourceMSBlobSPIRV));
+         assert(!rasterVS.empty());
+         assert(!rasterVSFlat.empty());
+         assert(!rasterPS.empty());
+         assert(!rasterPSMS.empty());
+         assert(!rasterPSFlat.empty());
+         assert(!rasterPSFlatMS.empty());
++        assert(!rasterPSNoDualSource.empty());
++        assert(!rasterPSNoDualSourceMS.empty());
++        assert(!rasterPSFlatNoDualSource.empty());
++        assert(!rasterPSFlatNoDualSourceMS.empty());
+     }
  
      // RasterShader
  
@@ -467,6 +525,17 @@ index 721a01e..ad2414c 100644
 +        if (shaderFormat != RenderShaderFormat::SPIRV) {
 +            g_FlatShadingSupported = true;
 +            return;
++        }
++
++        // Port DK64-Recomp Android: read the dual source blending reliability gate
++        // from the backend. When it's false, alpha blended raster pipelines switch
++        // to the RASTER_PS_NO_DUAL_SOURCE pixel shader permutations and standard
++        // SRC_ALPHA blending (see g_DualSourceBlendSupported). This must happen
++        // before the flat shading early return below: drivers that fail the flat
++        // probe are exactly the ones that need the dual source gate the most.
++        g_DualSourceBlendSupported = device->getCapabilities().dualSourceBlendReliable;
++        if (!g_DualSourceBlendSupported) {
++            fprintf(stderr, "RT64: driver reported as unreliable for dual source blending. Raster shaders will fold the blend factor into output 0.\n");
 +        }
 +
 +        g_FlatShadingSupported = device->getCapabilities().flatShadingReliable;
@@ -519,7 +588,7 @@ index 721a01e..ad2414c 100644
      RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
          const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
      {
-@@ -95,6 +266,8 @@ namespace RT64 {
+@@ -95,10 +303,22 @@ namespace RT64 {
          const bool useMSAA = (multisampling.sampleCount > 1);
          std::unique_ptr<RenderShader> vertexShader;
          std::unique_ptr<RenderShader> pixelShader;
@@ -528,7 +597,44 @@ index 721a01e..ad2414c 100644
  #ifdef __APPLE__
          std::vector<RenderSpecConstant> specConstants;
  #endif
-@@ -134,8 +307,32 @@ namespace RT64 {
+         if (shaderFormat == RenderShaderFormat::SPIRV) {
++            // Port DK64-Recomp Android: alpha blended states avoid dual source
++            // blending on drivers where the pipeline creation fails when the blend
++            // state references the secondary source. The permutation folds the
++            // blend factor into output 0's alpha channel (see createPipeline for
++            // the matching blend state). The interface is identical to the regular
++            // permutations, so the vertex shader choice doesn't change.
++            const bool copyMode = (desc.otherMode.cycleType() == G_CYC_COPY);
++            const bool alphaBlend = !copyMode && interop::Blender::usesAlphaBlend(desc.otherMode);
++            const bool noDualSource = alphaBlend && !g_DualSourceBlendSupported;
++
+             // Choose the pre-compiled shader permutations.
+             const respv::Shader *VS = nullptr;
+             const respv::Shader *PS = nullptr;
+@@ -106,10 +326,20 @@ namespace RT64 {
+ 
+             // Pick the correct SPIR-V based on the configuration.
+             if (desc.flags.smoothShade) {
+-                PS = useMSAA ? &optimizerCacheSPIRV->rasterPSMS : &optimizerCacheSPIRV->rasterPS;
++                if (noDualSource) {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSNoDualSourceMS : &optimizerCacheSPIRV->rasterPSNoDualSource;
++                }
++                else {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSMS : &optimizerCacheSPIRV->rasterPS;
++                }
+             }
+             else {
+-                PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMS : &optimizerCacheSPIRV->rasterPSFlat;
++                if (noDualSource) {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatNoDualSourceMS : &optimizerCacheSPIRV->rasterPSFlatNoDualSource;
++                }
++                else {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMS : &optimizerCacheSPIRV->rasterPSFlat;
++                }
+             }
+ 
+             thread_local std::vector<respv::SpecConstant> specConstants;
+@@ -134,8 +364,32 @@ namespace RT64 {
              bool psRun = respv::Optimizer::run(*PS, specConstants.data(), uint32_t(specConstants.size()), optimizedPS);
              assert(vsRun && psRun && "Shader optimization must always succeed as the inputs are always the same.");
  
@@ -561,7 +667,7 @@ index 721a01e..ad2414c 100644
          }
          else if (shaderFormat == RenderShaderFormat::METAL) {
  #       ifdef __APPLE__
-@@ -237,6 +434,14 @@ namespace RT64 {
+@@ -237,6 +491,79 @@ namespace RT64 {
  #endif
          creation.multisampling = multisampling;
          pipeline = createPipeline(creation);
@@ -569,14 +675,104 @@ index 721a01e..ad2414c 100644
 +        if ((pipeline == nullptr) || !pipeline->isValid()) {
 +            // Port DK64-Recomp Android: the creation of the specialized shaders is the
 +            // only pipeline creation that happens while the game is running, so log
-+            // enough state to identify the failing combination in a logcat.
-+            fprintf(stderr, "RT64: specialized raster shader (hash %016llX, smoothShade %d, msaa %u) failed to be created (VS %zu B, PS %zu B).\n",
-+                (unsigned long long)desc.hash(), int(desc.flags.smoothShade), uint32_t(multisampling.sampleCount), vertexShaderSize, pixelShaderSize);
++            // enough state to identify the failing combination in a logcat. The
++            // fixed function state matters as much as the shaders themselves: an
++            // alpha blended pipeline enables dual source blending, which is one of
++            // the known failure triggers on this driver family.
++            fprintf(stderr, "RT64: specialized raster shader (hash %016llX, smoothShade %d, msaa %u, alphaBlend %d, zCmp %d, zUpd %d, cvgAdd %d, noDualSourcePS %d) failed to be created (VS %zu B, PS %zu B).\n",
++                (unsigned long long)desc.hash(), int(desc.flags.smoothShade), uint32_t(multisampling.sampleCount),
++                int(creation.alphaBlend), int(creation.zCmp), int(creation.zUpd), int(creation.cvgAdd),
++                int(!g_DualSourceBlendSupported && creation.alphaBlend), vertexShaderSize, pixelShaderSize);
++
++            // Port DK64-Recomp Android: canary diagnostics. Retry the creation with
++            // shader pairs that are known to link on this driver family to bisect
++            // whether the failure comes from the shaders or from the fixed function
++            // state. The canary pipelines are never adopted for rendering. Note a
++            // FAILED canary is a weak signal (the driver can sulk after a failed
++            // link), while a SUCCESS canary is a strong signal.
++            //  1. Specialized VS + post blend dither PS + Copy blend: succeeds when
++            //     the specialized vertex shader and the pipeline layout are fine and
++            //     the problem is in the specialized pixel shader or the blend state.
++            //  2. Uber VS + post blend dither PS + Copy blend: succeeds when the
++            //     problem is in the specialized vertex shader (the uber VS already
++            //     proved itself in the post blend pipelines).
++            //  3. Uber VS + the very pixel shader that just failed + Copy blend:
++            //     succeeds when the pixel shader content is fine and the trigger is
++            //     the enabled blend state; fails when the pixel shader content is
++            //     the problem. This is the direct discriminator for the dual source
++            //     blending hypothesis.
++            {
++                std::unique_ptr<RenderShader> canaryPS = createPostBlendPixelShader(device, PostBlendDitherNoiseAddPSBlobSPIRV, std::size(PostBlendDitherNoiseAddPSBlobSPIRV));
++                if ((canaryPS != nullptr) && canaryPS->isValid() && (vertexShader != nullptr)) {
++                    PipelineCreation canaryCreation = creation;
++                    canaryCreation.vertexShader = vertexShader.get();
++                    canaryCreation.pixelShader = canaryPS.get();
++                    canaryCreation.alphaBlend = false;
++                    canaryCreation.cvgAdd = false;
++                    std::unique_ptr<RenderPipeline> canaryPipeline = createPipeline(canaryCreation);
++                    bool canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
++                    fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
++                }
++                else {
++                    fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): SKIPPED (shader creation failed).\n");
++                }
++
++                if ((canaryPS != nullptr) && canaryPS->isValid()) {
++                    std::unique_ptr<RenderShader> uberVS = device->createShader(RasterVSDynamicBlobSPIRV, std::size(RasterVSDynamicBlobSPIRV), "VSMain", shaderFormat);
++                    if ((uberVS != nullptr) && uberVS->isValid()) {
++                        PipelineCreation canaryCreation = creation;
++                        canaryCreation.vertexShader = uberVS.get();
++                        canaryCreation.pixelShader = canaryPS.get();
++                        canaryCreation.alphaBlend = false;
++                        canaryCreation.cvgAdd = false;
++                        std::unique_ptr<RenderPipeline> canaryPipeline = createPipeline(canaryCreation);
++                        bool canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
++                        fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
++
++                        // The direct PS-vs-blend discriminator only makes sense when
++                        // the uber VS is usable and the actual pixel shader exists.
++                        if ((pixelShader != nullptr) && pixelShader->isValid()) {
++                            canaryCreation.pixelShader = pixelShader.get();
++                            canaryPipeline = createPipeline(canaryCreation);
++                            canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
++                            fprintf(stderr, "RT64: canary retry (uber VS + failed PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
++                        }
++                    }
++                    else {
++                        fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): SKIPPED (uber VS creation failed).\n");
++                    }
++                }
++            }
 +        }
      }
  
      RasterShader::~RasterShader() { }
-@@ -441,8 +646,38 @@ namespace RT64 {
+@@ -330,11 +657,22 @@ namespace RT64 {
+         pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
+ 
+         // Alpha blending is performed by using dual source blending. The blending factor will be in the secondary output.
++        // Port DK64-Recomp Android: when dual source blending is unreliable, the pixel
++        // shader is the RASTER_PS_NO_DUAL_SOURCE permutation (the blend factor lives
++        // in output 0's alpha channel) and the pipeline uses standard SRC_ALPHA
++        // blending. N64 edge antialiasing (coverage in the alpha channel) degrades.
+         RenderBlendDesc &targetBlend = pipelineDesc.renderTargetBlend[0];
+         if (c.alphaBlend) {
+             targetBlend.blendEnabled = true;
+-            targetBlend.srcBlend = RenderBlend::SRC1_ALPHA;
+-            targetBlend.dstBlend = RenderBlend::INV_SRC1_ALPHA;
++            if (!g_DualSourceBlendSupported) {
++                targetBlend.srcBlend = RenderBlend::SRC_ALPHA;
++                targetBlend.dstBlend = RenderBlend::INV_SRC_ALPHA;
++            }
++            else {
++                targetBlend.srcBlend = RenderBlend::SRC1_ALPHA;
++                targetBlend.dstBlend = RenderBlend::INV_SRC1_ALPHA;
++            }
++
+             targetBlend.blendOp = RenderBlendOperation::ADD;
+         }
+ 
+@@ -441,8 +779,38 @@ namespace RT64 {
              return;
          }
  
@@ -616,7 +812,7 @@ index 721a01e..ad2414c 100644
  
          FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
          FramebufferRendererDescriptorTextureSet descriptorTextureSet;
-@@ -460,7 +695,7 @@ namespace RT64 {
+@@ -460,7 +828,7 @@ namespace RT64 {
          // Generate all possible combinations of pipeline creations and assign them to each thread. Skip the ones that are invalid.
          uint32_t pipelineCount = uint32_t(std::size(pipelines));
          pipelineThreadCreations.clear();
@@ -625,7 +821,7 @@ index 721a01e..ad2414c 100644
  
          PipelineCreation creation;
          creation.device = device;
-@@ -474,16 +709,20 @@ namespace RT64 {
+@@ -474,16 +842,20 @@ namespace RT64 {
          creation.multisampling = multisampling;
  
          uint32_t threadIndex = 0;
@@ -648,7 +844,7 @@ index 721a01e..ad2414c 100644
          pipelineThreads.clear();
          pipelineThreads.resize(pipelineThreadCreations.size());
          for (uint32_t i = 0; i < uint32_t(pipelineThreads.size()); i++) {
-@@ -503,9 +742,9 @@ namespace RT64 {
+@@ -503,9 +875,9 @@ namespace RT64 {
              break;
  #   endif
          case RenderShaderFormat::SPIRV:
@@ -661,7 +857,7 @@ index 721a01e..ad2414c 100644
              break;
  #   ifdef __APPLE__
          case RenderShaderFormat::METAL:
-@@ -552,6 +791,10 @@ namespace RT64 {
+@@ -552,6 +924,10 @@ namespace RT64 {
  
          postBlendDesc.pixelShader = postBlendSubNegativePixelShader.get();
          postBlendDitherNoiseSubNegativePipeline = device->createGraphicsPipeline(postBlendDesc);
@@ -672,7 +868,7 @@ index 721a01e..ad2414c 100644
      }
  
      RasterShaderUber::~RasterShaderUber() {
-@@ -559,27 +802,34 @@ namespace RT64 {
+@@ -559,27 +935,34 @@ namespace RT64 {
      }
  
      void RasterShaderUber::threadCreatePipelines(uint32_t threadIndex) {
@@ -714,10 +910,25 @@ index 721a01e..ad2414c 100644
          }
      }
 diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
-index 3b991ff..c8ced9f 100644
+old mode 100644
+new mode 100755
+index 3b991ff..fc54886
 --- a/src/render/rt64_raster_shader.h
 +++ b/src/render/rt64_raster_shader.h
-@@ -72,6 +72,13 @@ namespace RT64 {
+@@ -35,6 +35,12 @@ namespace RT64 {
+         respv::Shader rasterPSFlatDepthMS;
+         respv::Shader rasterPSFlat;
+         respv::Shader rasterPSFlatMS;
++        // Port DK64-Recomp Android: permutations that fold the blend factor into
++        // output 0's alpha channel so pipelines can avoid dual source blending.
++        respv::Shader rasterPSNoDualSource;
++        respv::Shader rasterPSNoDualSourceMS;
++        respv::Shader rasterPSFlatNoDualSource;
++        respv::Shader rasterPSFlatNoDualSourceMS;
+ 
+         void initialize();
+     };
+@@ -72,6 +78,13 @@ namespace RT64 {
          static RasterShaderText generateShaderText(const ShaderDescription &desc, bool multisampling);
          static std::unique_ptr<RenderPipeline> createPipeline(const PipelineCreation &c);
          static RenderMultisampling generateMultisamplingPattern(uint32_t sampleCount, bool sampleLocationsSupported);
@@ -731,7 +942,7 @@ index 3b991ff..c8ced9f 100644
      };
  
      struct RasterShaderUber {
-@@ -85,6 +92,7 @@ namespace RT64 {
+@@ -85,6 +98,7 @@ namespace RT64 {
          std::mutex firstPipelineMutex;
          std::condition_variable firstPipelineCondition;
          bool pipelinesCreated = false;
@@ -740,7 +951,9 @@ index 3b991ff..c8ced9f 100644
          std::vector<std::vector<PipelineCreation>> pipelineThreadCreations;
          std::vector<std::unique_ptr<std::thread>> pipelineThreads;
 diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
-index bf7b669..6a8aa57 100644
+old mode 100644
+new mode 100755
+index bf7b669..6a8aa57
 --- a/src/render/rt64_raster_shader_cache.cpp
 +++ b/src/render/rt64_raster_shader_cache.cpp
 @@ -58,13 +58,31 @@ namespace RT64 {
@@ -833,7 +1046,9 @@ index bf7b669..6a8aa57 100644
          return shaderUber.get();
      }
 diff --git a/src/render/rt64_raster_shader_cache.h b/src/render/rt64_raster_shader_cache.h
-index 5c40c18..ed0353a 100644
+old mode 100644
+new mode 100755
+index 5c40c18..ed0353a
 --- a/src/render/rt64_raster_shader_cache.h
 +++ b/src/render/rt64_raster_shader_cache.h
 @@ -39,6 +39,7 @@ namespace RT64 {
@@ -853,7 +1068,7 @@ index 5c40c18..ed0353a 100644
          uint32_t shaderCount();
      };
 diff --git a/src/shaders/FlatProbePS.hlsl b/src/shaders/FlatProbePS.hlsl
-new file mode 100644
+new file mode 100755
 index 0000000..6b4bedb
 --- /dev/null
 +++ b/src/shaders/FlatProbePS.hlsl
@@ -879,7 +1094,7 @@ index 0000000..6b4bedb
 +    resultColor = vertexFlatColor;
 +}
 diff --git a/src/shaders/FlatProbeVS.hlsl b/src/shaders/FlatProbeVS.hlsl
-new file mode 100644
+new file mode 100755
 index 0000000..5575dfb
 --- /dev/null
 +++ b/src/shaders/FlatProbeVS.hlsl
@@ -907,3 +1122,47 @@ index 0000000..5575dfb
 +    oSmoothColor = iColor;
 +    oFlatColor = iColor;
 +}
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+old mode 100644
+new mode 100755
+index e7895c3..a57ab1a
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -290,8 +290,17 @@ void PSMain(
+ #if defined(DYNAMIC_RENDER_PARAMS)
+     , bool isFrontFace : SV_IsFrontFace
+ #endif
++#ifdef RASTER_PS_NO_DUAL_SOURCE
++    // Port DK64-Recomp Android: dual source blending is not reliable on this
++    // driver, so the secondary output is dropped entirely. Single output + blend
++    // enabled is one of the configurations proven to link on the affected drivers
++    // (the post blend dither pipelines), while keeping the secondary output would
++    // land in an unproven one.
++    , [[vk::location(0)]] out float4 pixelColor : SV_TARGET0
++#else
+     , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
+     , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
++#endif
+ )
+ {
+ #if !defined(DYNAMIC_RENDER_PARAMS)
+@@ -307,7 +316,18 @@ void PSMain(
+         discard;
+     }
+ 
++#ifdef RASTER_PS_NO_DUAL_SOURCE
++    // The blend factor is folded into output 0's alpha channel so the pipeline can
++    // use standard SRC_ALPHA blending. The dedicated coverage value that normally
++    // lives in output 0's alpha is sacrificed, which only degrades the N64 edge
++    // antialiasing emulation. Side effect: the CVG_DST_SAVE preservation of the
++    // destination alpha (which writes 0 to resultColor.a) no longer reaches the
++    // framebuffer under alpha blending; no consumer of that value exists today.
++    pixelColor = resultColor;
++    pixelColor.a = resultAlpha.a;
++#else
+     pixelColor = resultColor;
+     pixelAlpha = resultAlpha;
++#endif
+ }
+ #endif
+\ No newline at end of file
