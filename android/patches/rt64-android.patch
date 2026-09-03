@@ -1,7 +1,7 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 old mode 100644
 new mode 100755
-index 79dfc38..9a8487b
+index 79dfc38..8d57049
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -58,7 +58,10 @@ elseif (APPLE)
@@ -65,7 +65,7 @@ index 79dfc38..9a8487b
  
  # Add any Apple-specific source files and libraries
  if (APPLE)
-@@ -504,9 +533,21 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
+@@ -504,9 +533,32 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
  build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
  build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
  build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
@@ -77,6 +77,17 @@ index 79dfc38..9a8487b
 +build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantNoDualSourceMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" "-D RASTER_PS_NO_DUAL_SOURCE")
 +build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatNoDualSource.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D RASTER_PS_NO_DUAL_SOURCE")
 +build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatNoDualSourceMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" "-D RASTER_PS_NO_DUAL_SOURCE")
++# Port DK64-Recomp Android: fallback permutations for drivers that reject some of
++# the specialized pixel shaders at compilation time (proprietary Qualcomm Adreno).
++# The runtime walks down these rungs only for the shader hashes whose original
++# pipeline fails to be created; each rung keeps the same interface and spec
++# constant set, so it's a drop-in replacement of the pixel shader only.
++# SAFE: no screen-space derivatives and no derivative-dependent features.
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantSafe.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D RASTER_PS_SAFE" "-D RASTER_PS_NO_DUAL_SOURCE")
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantSafeFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D RASTER_PS_SAFE" "-D RASTER_PS_NO_DUAL_SOURCE")
++# SOLID: vertex color only, no textures and no buffers (last resort before the draw is skipped).
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPSSolidPS.hlsl" "src/shaders/RasterPSSolid.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
++build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPSSolidPS.hlsl" "src/shaders/RasterPSSolidFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
  build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
  build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
  build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
@@ -336,10 +347,10 @@ index 9fae0d4..c369ea3
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
 old mode 100644
 new mode 100755
-index 721a01e..87be575
+index 721a01e..172ba97
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
-@@ -13,9 +13,15 @@
+@@ -13,9 +13,19 @@
  #include "shaders/RasterPSSpecConstantMS.hlsl.spirv.h"
  #include "shaders/RasterPSSpecConstantFlat.hlsl.spirv.h"
  #include "shaders/RasterPSSpecConstantFlatMS.hlsl.spirv.h"
@@ -347,6 +358,10 @@ index 721a01e..87be575
 +#include "shaders/RasterPSSpecConstantNoDualSourceMS.hlsl.spirv.h"
 +#include "shaders/RasterPSSpecConstantFlatNoDualSource.hlsl.spirv.h"
 +#include "shaders/RasterPSSpecConstantFlatNoDualSourceMS.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantSafe.hlsl.spirv.h"
++#include "shaders/RasterPSSpecConstantSafeFlat.hlsl.spirv.h"
++#include "shaders/RasterPSSolid.hlsl.spirv.h"
++#include "shaders/RasterPSSolidFlat.hlsl.spirv.h"
  #include "shaders/RasterVSDynamic.hlsl.spirv.h"
  #include "shaders/RasterVSSpecConstant.hlsl.spirv.h"
  #include "shaders/RasterVSSpecConstantFlat.hlsl.spirv.h"
@@ -355,7 +370,7 @@ index 721a01e..87be575
  #include "shaders/PostBlendDitherNoiseAddPS.hlsl.spirv.h"
  #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
  #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
-@@ -45,6 +51,9 @@
+@@ -45,6 +55,9 @@
  #endif
  #include "shared/rt64_raster_params.h"
  
@@ -365,7 +380,7 @@ index 721a01e..87be575
  #include "rt64_descriptor_sets.h"
  #include "rt64_render_target.h"
  
-@@ -65,6 +74,123 @@ namespace RT64 {
+@@ -65,6 +78,159 @@ namespace RT64 {
          RenderInputElement("COLOR", 0, 2, RasterColorFormat, 2, 0)
      };
  
@@ -486,10 +501,46 @@ index 721a01e..87be575
 +        return device->createShader(blob, blobSize, "PSMain", RenderShaderFormat::SPIRV);
 +    }
 +
++    // Port DK64-Recomp Android: builds one specialized pixel shader from a fallback
++    // base permutation for the shader description. The spec constant set and the
++    // flat decoration stripping are exactly the ones the primary path uses, so a
++    // fallback shader is a drop-in replacement of the pixel shader only. Returns
++    // null when the specialization fails or the driver rejects the shader.
++    static std::unique_ptr<RenderShader> createSpecializedPixelShader(RenderDevice *device, RenderShaderFormat shaderFormat, const respv::Shader &baseShader, const ShaderDescription &desc, size_t *outSize) {
++        std::vector<respv::SpecConstant> specConstants;
++        specConstants.emplace_back(0, std::vector<uint32_t>{ desc.otherMode.L });
++        specConstants.emplace_back(1, std::vector<uint32_t>{ desc.otherMode.H });
++        specConstants.emplace_back(2, std::vector<uint32_t>{ desc.colorCombiner.L });
++        specConstants.emplace_back(3, std::vector<uint32_t>{ desc.colorCombiner.H });
++        specConstants.emplace_back(4, std::vector<uint32_t>{ desc.flags.value });
++
++        std::vector<uint8_t> optimizedPS;
++        if (!respv::Optimizer::run(baseShader, specConstants.data(), uint32_t(specConstants.size()), optimizedPS)) {
++            return nullptr;
++        }
++
++        if (!g_FlatShadingSupported) {
++            std::vector<uint8_t> strippedData;
++            if (stripFlatDecorationsFromSPIRV(optimizedPS.data(), optimizedPS.size(), strippedData)) {
++                optimizedPS = std::move(strippedData);
++            }
++            else {
++                fprintf(stderr, "RT64: failed to strip flat decorations from a fallback raster pixel shader.\n");
++            }
++        }
++
++        std::unique_ptr<RenderShader> pixelShader = device->createShader(optimizedPS.data(), optimizedPS.size(), "PSMain", shaderFormat);
++        if ((pixelShader != nullptr) && pixelShader->isValid() && (outSize != nullptr)) {
++            *outSize = optimizedPS.size();
++        }
++
++        return pixelShader;
++    }
++
      // OptimizerCacheSPIRV
  
      void OptimizerCacheSPIRV::initialize() {
-@@ -74,16 +200,98 @@ namespace RT64 {
+@@ -74,16 +240,106 @@ namespace RT64 {
          rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
          rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
          rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
@@ -497,6 +548,10 @@ index 721a01e..87be575
 +        rasterPSNoDualSourceMS.parse(RasterPSSpecConstantNoDualSourceMSBlobSPIRV, std::size(RasterPSSpecConstantNoDualSourceMSBlobSPIRV));
 +        rasterPSFlatNoDualSource.parse(RasterPSSpecConstantFlatNoDualSourceBlobSPIRV, std::size(RasterPSSpecConstantFlatNoDualSourceBlobSPIRV));
 +        rasterPSFlatNoDualSourceMS.parse(RasterPSSpecConstantFlatNoDualSourceMSBlobSPIRV, std::size(RasterPSSpecConstantFlatNoDualSourceMSBlobSPIRV));
++        rasterPSSafe.parse(RasterPSSpecConstantSafeBlobSPIRV, std::size(RasterPSSpecConstantSafeBlobSPIRV));
++        rasterPSSafeFlat.parse(RasterPSSpecConstantSafeFlatBlobSPIRV, std::size(RasterPSSpecConstantSafeFlatBlobSPIRV));
++        rasterPSSolid.parse(RasterPSSolidBlobSPIRV, std::size(RasterPSSolidBlobSPIRV));
++        rasterPSSolidFlat.parse(RasterPSSolidFlatBlobSPIRV, std::size(RasterPSSolidFlatBlobSPIRV));
          assert(!rasterVS.empty());
          assert(!rasterVSFlat.empty());
          assert(!rasterPS.empty());
@@ -507,6 +562,10 @@ index 721a01e..87be575
 +        assert(!rasterPSNoDualSourceMS.empty());
 +        assert(!rasterPSFlatNoDualSource.empty());
 +        assert(!rasterPSFlatNoDualSourceMS.empty());
++        assert(!rasterPSSafe.empty());
++        assert(!rasterPSSafeFlat.empty());
++        assert(!rasterPSSolid.empty());
++        assert(!rasterPSSolidFlat.empty());
      }
  
      // RasterShader
@@ -588,7 +647,7 @@ index 721a01e..87be575
      RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
          const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
      {
-@@ -95,10 +303,22 @@ namespace RT64 {
+@@ -95,10 +351,22 @@ namespace RT64 {
          const bool useMSAA = (multisampling.sampleCount > 1);
          std::unique_ptr<RenderShader> vertexShader;
          std::unique_ptr<RenderShader> pixelShader;
@@ -611,7 +670,7 @@ index 721a01e..87be575
              // Choose the pre-compiled shader permutations.
              const respv::Shader *VS = nullptr;
              const respv::Shader *PS = nullptr;
-@@ -106,10 +326,20 @@ namespace RT64 {
+@@ -106,10 +374,20 @@ namespace RT64 {
  
              // Pick the correct SPIR-V based on the configuration.
              if (desc.flags.smoothShade) {
@@ -634,7 +693,7 @@ index 721a01e..87be575
              }
  
              thread_local std::vector<respv::SpecConstant> specConstants;
-@@ -134,8 +364,32 @@ namespace RT64 {
+@@ -134,8 +412,32 @@ namespace RT64 {
              bool psRun = respv::Optimizer::run(*PS, specConstants.data(), uint32_t(specConstants.size()), optimizedPS);
              assert(vsRun && psRun && "Shader optimization must always succeed as the inputs are always the same.");
  
@@ -667,7 +726,7 @@ index 721a01e..87be575
          }
          else if (shaderFormat == RenderShaderFormat::METAL) {
  #       ifdef __APPLE__
-@@ -237,6 +491,79 @@ namespace RT64 {
+@@ -237,6 +539,175 @@ namespace RT64 {
  #endif
          creation.multisampling = multisampling;
          pipeline = createPipeline(creation);
@@ -684,70 +743,166 @@ index 721a01e..87be575
 +                int(creation.alphaBlend), int(creation.zCmp), int(creation.zUpd), int(creation.cvgAdd),
 +                int(!g_DualSourceBlendSupported && creation.alphaBlend), vertexShaderSize, pixelShaderSize);
 +
-+            // Port DK64-Recomp Android: canary diagnostics. Retry the creation with
-+            // shader pairs that are known to link on this driver family to bisect
-+            // whether the failure comes from the shaders or from the fixed function
-+            // state. The canary pipelines are never adopted for rendering. Note a
-+            // FAILED canary is a weak signal (the driver can sulk after a failed
-+            // link), while a SUCCESS canary is a strong signal.
-+            //  1. Specialized VS + post blend dither PS + Copy blend: succeeds when
-+            //     the specialized vertex shader and the pipeline layout are fine and
-+            //     the problem is in the specialized pixel shader or the blend state.
-+            //  2. Uber VS + post blend dither PS + Copy blend: succeeds when the
-+            //     problem is in the specialized vertex shader (the uber VS already
-+            //     proved itself in the post blend pipelines).
-+            //  3. Uber VS + the very pixel shader that just failed + Copy blend:
-+            //     succeeds when the pixel shader content is fine and the trigger is
-+            //     the enabled blend state; fails when the pixel shader content is
-+            //     the problem. This is the direct discriminator for the dual source
-+            //     blending hypothesis.
-+            {
-+                std::unique_ptr<RenderShader> canaryPS = createPostBlendPixelShader(device, PostBlendDitherNoiseAddPSBlobSPIRV, std::size(PostBlendDitherNoiseAddPSBlobSPIRV));
-+                if ((canaryPS != nullptr) && canaryPS->isValid() && (vertexShader != nullptr)) {
-+                    PipelineCreation canaryCreation = creation;
-+                    canaryCreation.vertexShader = vertexShader.get();
-+                    canaryCreation.pixelShader = canaryPS.get();
-+                    canaryCreation.alphaBlend = false;
-+                    canaryCreation.cvgAdd = false;
-+                    std::unique_ptr<RenderPipeline> canaryPipeline = createPipeline(canaryCreation);
-+                    bool canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
-+                    fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
-+                }
-+                else {
-+                    fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): SKIPPED (shader creation failed).\n");
++            // Port DK64-Recomp Android: fallback ladder. Some proprietary Qualcomm
++            // Adreno drivers deterministically reject the compilation of the pixel
++            // shader for certain states ("Failed to link shaders", VK_ERROR_UNKNOWN)
++            // while the vertex shader and the fixed function state of the very same
++            // pipeline link fine (proven by the canary retries of earlier builds).
++            // When the original pixel shader is rejected, walk down progressively
++            // simpler permutations of the pixel shader until the driver accepts one
++            // and ADOPT the working pipeline for rendering, so the geometry degrades
++            // instead of disappearing (the draws of an invalid pipeline are skipped
++            // by the backend guards, which is what blacked out whole categories of
++            // geometry). Every rung keeps the same interface, spec constant set and
++            // fixed function state:
++            //   rung 2 (SAFE): no screen-space derivatives, no decal depth tolerance,
++            //     no LOD derivation, no mip level derivation. Textures, combiners,
++            //     blending and fog are fully preserved.
++            //   rung 3 (SOLID): vertex color only, no textures and no buffers.
++            // Note the blend state: on drivers where dual source blending is
++            // unreliable the pipelines already use SRC_ALPHA blending, which is what
++            // the single-output fallback permutations expect. A reliable dual source
++            // driver that still fails the shader here would pair the fallback with
++            // SRC1_ALPHA blending, which is invalid; such a configuration doesn't
++            // exist today (the fallbacks only trigger on the unreliable family) and
++            // the creation is skipped below if it ever happens.
++            if (shaderFormat == RenderShaderFormat::SPIRV) {
++                bool dualSourceActive = creation.alphaBlend && g_DualSourceBlendSupported;
++
++                if (!dualSourceActive) {
++                    const respv::Shader *safePS = desc.flags.smoothShade ? &optimizerCacheSPIRV->rasterPSSafe : &optimizerCacheSPIRV->rasterPSSafeFlat;
++                    size_t safeSize = 0;
++                    std::unique_ptr<RenderShader> safeShader = createSpecializedPixelShader(device, shaderFormat, *safePS, desc, &safeSize);
++                    if ((safeShader != nullptr) && safeShader->isValid()) {
++                        PipelineCreation rungCreation = creation;
++                        rungCreation.pixelShader = safeShader.get();
++                        std::unique_ptr<RenderPipeline> rungPipeline = createPipeline(rungCreation);
++                        if ((rungPipeline != nullptr) && rungPipeline->isValid()) {
++                            pipeline = std::move(rungPipeline);
++                            fprintf(stderr, "RT64: raster shader (hash %016llX) adopted fallback rung 2 (safe, no derivatives, PS %zu B).\n", (unsigned long long)desc.hash(), safeSize);
++                        }
++                    }
++
++                    if ((pipeline == nullptr) || !pipeline->isValid()) {
++                        const respv::Shader *solidPS = desc.flags.smoothShade ? &optimizerCacheSPIRV->rasterPSSolid : &optimizerCacheSPIRV->rasterPSSolidFlat;
++                        size_t solidSize = 0;
++                        std::unique_ptr<RenderShader> solidShader = createSpecializedPixelShader(device, shaderFormat, *solidPS, desc, &solidSize);
++                        if ((solidShader != nullptr) && solidShader->isValid()) {
++                            PipelineCreation rungCreation = creation;
++                            rungCreation.pixelShader = solidShader.get();
++                            std::unique_ptr<RenderPipeline> rungPipeline = createPipeline(rungCreation);
++                            if ((rungPipeline != nullptr) && rungPipeline->isValid()) {
++                                pipeline = std::move(rungPipeline);
++                                fprintf(stderr, "RT64: raster shader (hash %016llX) adopted fallback rung 3 (solid, vertex color only, PS %zu B).\n", (unsigned long long)desc.hash(), solidSize);
++                            }
++                        }
++                    }
 +                }
 +
-+                if ((canaryPS != nullptr) && canaryPS->isValid()) {
-+                    std::unique_ptr<RenderShader> uberVS = device->createShader(RasterVSDynamicBlobSPIRV, std::size(RasterVSDynamicBlobSPIRV), "VSMain", shaderFormat);
-+                    if ((uberVS != nullptr) && uberVS->isValid()) {
++                if ((pipeline == nullptr) || !pipeline->isValid()) {
++                    // Port DK64-Recomp Android: driver sulk mitigation. A failed shader
++                    // compilation can leave the Qualcomm compiler in a state where the
++                    // next creation fails too, which would knock the fallback rungs out
++                    // spuriously. Warm the compiler with a known-good canary pipeline
++                    // (specialized VS + dither PS + Copy blend) and retry the SAFE rung
++                    // once; adopt it if the retry links.
++                    if (!dualSourceActive && (vertexShader != nullptr)) {
++                        std::unique_ptr<RenderShader> warmUpPS = createPostBlendPixelShader(device, PostBlendDitherNoiseAddPSBlobSPIRV, std::size(PostBlendDitherNoiseAddPSBlobSPIRV));
++                        if ((warmUpPS != nullptr) && warmUpPS->isValid()) {
++                            PipelineCreation warmUpCreation = creation;
++                            warmUpCreation.pixelShader = warmUpPS.get();
++                            warmUpCreation.alphaBlend = false;
++                            warmUpCreation.cvgAdd = false;
++                            std::unique_ptr<RenderPipeline> warmUpPipeline = createPipeline(warmUpCreation);
++                            if ((warmUpPipeline != nullptr) && warmUpPipeline->isValid()) {
++                                size_t safeSizeRetry = 0;
++                                const respv::Shader *safePSRetry = desc.flags.smoothShade ? &optimizerCacheSPIRV->rasterPSSafe : &optimizerCacheSPIRV->rasterPSSafeFlat;
++                                std::unique_ptr<RenderShader> safeShaderRetry = createSpecializedPixelShader(device, shaderFormat, *safePSRetry, desc, &safeSizeRetry);
++                                if ((safeShaderRetry != nullptr) && safeShaderRetry->isValid()) {
++                                    PipelineCreation rungCreation = creation;
++                                    rungCreation.pixelShader = safeShaderRetry.get();
++                                    std::unique_ptr<RenderPipeline> rungPipeline = createPipeline(rungCreation);
++                                    if ((rungPipeline != nullptr) && rungPipeline->isValid()) {
++                                        pipeline = std::move(rungPipeline);
++                                        fprintf(stderr, "RT64: raster shader (hash %016llX) adopted fallback rung 2 (safe, no derivatives, PS %zu B) after canary warm-up.\n", (unsigned long long)desc.hash(), safeSizeRetry);
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++
++            if ((pipeline == nullptr) || !pipeline->isValid()) {
++                // Port DK64-Recomp Android: canary diagnostics, run only when every
++                // fallback rung failed (including the warm-up retry), so they don't
++                // pollute the log of healthy degradations. Retry the creation with
++                // shader pairs that are known to link on this driver family to bisect
++                // whether the failure comes from the shaders or from the fixed function
++                // state. The canary pipelines are never adopted for rendering. Note a
++                // FAILED canary is a weak signal (the driver can sulk after a failed
++                // link), while a SUCCESS canary is a strong signal.
++                //  1. Specialized VS + post blend dither PS + Copy blend: succeeds when
++                //     the specialized vertex shader and the pipeline layout are fine and
++                //     the problem is in the specialized pixel shader or the blend state.
++                //  2. Uber VS + post blend dither PS + Copy blend: succeeds when the
++                //     problem is in the specialized vertex shader (the uber VS already
++                //     proved itself in the post blend pipelines).
++                //  3. Uber VS + the very pixel shader that just failed + Copy blend:
++                //     succeeds when the pixel shader content is fine and the trigger is
++                //     the enabled blend state; fails when the pixel shader content is
++                //     the problem. This is the direct discriminator for the dual source
++                //     blending hypothesis.
++                {
++                    std::unique_ptr<RenderShader> canaryPS = createPostBlendPixelShader(device, PostBlendDitherNoiseAddPSBlobSPIRV, std::size(PostBlendDitherNoiseAddPSBlobSPIRV));
++                    if ((canaryPS != nullptr) && canaryPS->isValid() && (vertexShader != nullptr)) {
 +                        PipelineCreation canaryCreation = creation;
-+                        canaryCreation.vertexShader = uberVS.get();
++                        canaryCreation.vertexShader = vertexShader.get();
 +                        canaryCreation.pixelShader = canaryPS.get();
 +                        canaryCreation.alphaBlend = false;
 +                        canaryCreation.cvgAdd = false;
 +                        std::unique_ptr<RenderPipeline> canaryPipeline = createPipeline(canaryCreation);
 +                        bool canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
-+                        fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
-+
-+                        // The direct PS-vs-blend discriminator only makes sense when
-+                        // the uber VS is usable and the actual pixel shader exists.
-+                        if ((pixelShader != nullptr) && pixelShader->isValid()) {
-+                            canaryCreation.pixelShader = pixelShader.get();
-+                            canaryPipeline = createPipeline(canaryCreation);
-+                            canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
-+                            fprintf(stderr, "RT64: canary retry (uber VS + failed PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
-+                        }
++                        fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
 +                    }
 +                    else {
-+                        fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): SKIPPED (uber VS creation failed).\n");
++                        fprintf(stderr, "RT64: canary retry (specialized VS + dither PS + Copy blend): SKIPPED (shader creation failed).\n");
++                    }
++
++                    if ((canaryPS != nullptr) && canaryPS->isValid()) {
++                        std::unique_ptr<RenderShader> uberVS = device->createShader(RasterVSDynamicBlobSPIRV, std::size(RasterVSDynamicBlobSPIRV), "VSMain", shaderFormat);
++                        if ((uberVS != nullptr) && uberVS->isValid()) {
++                            PipelineCreation canaryCreation = creation;
++                            canaryCreation.vertexShader = uberVS.get();
++                            canaryCreation.pixelShader = canaryPS.get();
++                            canaryCreation.alphaBlend = false;
++                            canaryCreation.cvgAdd = false;
++                            std::unique_ptr<RenderPipeline> canaryPipeline = createPipeline(canaryCreation);
++                            bool canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
++                            fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
++
++                            // The direct PS-vs-blend discriminator only makes sense when
++                            // the uber VS is usable and the actual pixel shader exists.
++                            if ((pixelShader != nullptr) && pixelShader->isValid()) {
++                                canaryCreation.pixelShader = pixelShader.get();
++                                canaryPipeline = createPipeline(canaryCreation);
++                                canaryOK = (canaryPipeline != nullptr) && canaryPipeline->isValid();
++                                fprintf(stderr, "RT64: canary retry (uber VS + failed PS + Copy blend): %s.\n", canaryOK ? "SUCCESS" : "FAILED");
++                            }
++                        }
++                        else {
++                            fprintf(stderr, "RT64: canary retry (uber VS + dither PS + Copy blend): SKIPPED (uber VS creation failed).\n");
++                        }
 +                    }
 +                }
++
++                fprintf(stderr, "RT64: raster shader (hash %016llX) exhausted every fallback rung; its draws will be skipped.\n", (unsigned long long)desc.hash());
 +            }
 +        }
      }
  
      RasterShader::~RasterShader() { }
-@@ -330,11 +657,22 @@ namespace RT64 {
+@@ -330,11 +801,22 @@ namespace RT64 {
          pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
  
          // Alpha blending is performed by using dual source blending. The blending factor will be in the secondary output.
@@ -772,7 +927,7 @@ index 721a01e..87be575
              targetBlend.blendOp = RenderBlendOperation::ADD;
          }
  
-@@ -441,8 +779,38 @@ namespace RT64 {
+@@ -441,8 +923,38 @@ namespace RT64 {
              return;
          }
  
@@ -812,7 +967,7 @@ index 721a01e..87be575
  
          FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
          FramebufferRendererDescriptorTextureSet descriptorTextureSet;
-@@ -460,7 +828,7 @@ namespace RT64 {
+@@ -460,7 +972,7 @@ namespace RT64 {
          // Generate all possible combinations of pipeline creations and assign them to each thread. Skip the ones that are invalid.
          uint32_t pipelineCount = uint32_t(std::size(pipelines));
          pipelineThreadCreations.clear();
@@ -821,7 +976,7 @@ index 721a01e..87be575
  
          PipelineCreation creation;
          creation.device = device;
-@@ -474,16 +842,20 @@ namespace RT64 {
+@@ -474,16 +986,20 @@ namespace RT64 {
          creation.multisampling = multisampling;
  
          uint32_t threadIndex = 0;
@@ -844,7 +999,7 @@ index 721a01e..87be575
          pipelineThreads.clear();
          pipelineThreads.resize(pipelineThreadCreations.size());
          for (uint32_t i = 0; i < uint32_t(pipelineThreads.size()); i++) {
-@@ -503,9 +875,9 @@ namespace RT64 {
+@@ -503,9 +1019,9 @@ namespace RT64 {
              break;
  #   endif
          case RenderShaderFormat::SPIRV:
@@ -857,7 +1012,7 @@ index 721a01e..87be575
              break;
  #   ifdef __APPLE__
          case RenderShaderFormat::METAL:
-@@ -552,6 +924,10 @@ namespace RT64 {
+@@ -552,6 +1068,10 @@ namespace RT64 {
  
          postBlendDesc.pixelShader = postBlendSubNegativePixelShader.get();
          postBlendDitherNoiseSubNegativePipeline = device->createGraphicsPipeline(postBlendDesc);
@@ -868,7 +1023,7 @@ index 721a01e..87be575
      }
  
      RasterShaderUber::~RasterShaderUber() {
-@@ -559,27 +935,34 @@ namespace RT64 {
+@@ -559,27 +1079,34 @@ namespace RT64 {
      }
  
      void RasterShaderUber::threadCreatePipelines(uint32_t threadIndex) {
@@ -912,10 +1067,10 @@ index 721a01e..87be575
 diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
 old mode 100644
 new mode 100755
-index 3b991ff..fc54886
+index 3b991ff..fa81d99
 --- a/src/render/rt64_raster_shader.h
 +++ b/src/render/rt64_raster_shader.h
-@@ -35,6 +35,12 @@ namespace RT64 {
+@@ -35,6 +35,29 @@ namespace RT64 {
          respv::Shader rasterPSFlatDepthMS;
          respv::Shader rasterPSFlat;
          respv::Shader rasterPSFlatMS;
@@ -925,10 +1080,27 @@ index 3b991ff..fc54886
 +        respv::Shader rasterPSNoDualSourceMS;
 +        respv::Shader rasterPSFlatNoDualSource;
 +        respv::Shader rasterPSFlatNoDualSourceMS;
++        // Port DK64-Recomp Android: fallback permutations used when the driver
++        // rejects the specialized pixel shader of a hash (proprietary Qualcomm
++        // Adreno). RasterShader walks down these rungs only after the original
++        // pipeline creation fails. SAFE keeps textures/combiners/blending but
++        // drops derivatives (and the features that depend on them); SOLID shades
++        // with the vertex color only and is the last rung before a draw is
++        // skipped. All of them are single-output (blend factor in output 0).
++        // Deliberate design note: there are no MULTISAMPLING variants of the
++        // fallbacks. None of their code paths are MS-sensitive (the decal depth
++        // read, the only MS-dependent feature, is compiled out of SAFE and was
++        // never in SOLID), so the non-MS blobs are valid for MSAA pipelines. If a
++        // fallback ever gains MS-sensitive code, matching _MS variants must be
++        // added in the same commit.
++        respv::Shader rasterPSSafe;
++        respv::Shader rasterPSSafeFlat;
++        respv::Shader rasterPSSolid;
++        respv::Shader rasterPSSolidFlat;
  
          void initialize();
      };
-@@ -72,6 +78,13 @@ namespace RT64 {
+@@ -72,6 +95,13 @@ namespace RT64 {
          static RasterShaderText generateShaderText(const ShaderDescription &desc, bool multisampling);
          static std::unique_ptr<RenderPipeline> createPipeline(const PipelineCreation &c);
          static RenderMultisampling generateMultisamplingPattern(uint32_t sampleCount, bool sampleLocationsSupported);
@@ -942,7 +1114,7 @@ index 3b991ff..fc54886
      };
  
      struct RasterShaderUber {
-@@ -85,6 +98,7 @@ namespace RT64 {
+@@ -85,6 +115,7 @@ namespace RT64 {
          std::mutex firstPipelineMutex;
          std::condition_variable firstPipelineCondition;
          bool pipelinesCreated = false;
@@ -1125,10 +1297,115 @@ index 0000000..5575dfb
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
 old mode 100644
 new mode 100755
-index e7895c3..a57ab1a
+index e7895c3..4349769
 --- a/src/shaders/RasterPS.hlsl
 +++ b/src/shaders/RasterPS.hlsl
-@@ -290,8 +290,17 @@ void PSMain(
+@@ -45,6 +45,41 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
+ }
+ #endif
+ 
++// Port DK64-Recomp Android: fallback permutation (RASTER_PS_SAFE). The proprietary
++// Qualcomm drivers of the Adreno 6xx family deterministically fail the compilation
++// of some of the specialized raster pixel shaders ("Failed to link shaders",
++// VK_ERROR_UNKNOWN), which used to leave whole geometry categories unrendered
++// (black sky/ground) because the draws got skipped. The offending construct could
++// never be identified offline (the driver gives no info log), so the runtime falls
++// back to progressively simpler permutations of this same shader until the driver
++// accepts one:
++//   rung 1 (original): full specialized shader.
++//   rung 2 (SAFE): no screen-space derivatives (and no features that depend on
++//     them: decal depth tolerance, LOD derivation, low resolution UV correction),
++//     but textures, combiners, blending and fog are fully preserved.
++//   rung 3 (SOLID, see RasterPSSolidPS.hlsl): vertex color only.
++// Each rung is embedded as a static SPIR-V permutation and specialized with the
++// exact same spec constants, so adopting a fallback changes no pipeline state.
++#if defined(RASTER_PS_SAFE)
++float rtDdx(float v) { return 0.0f; }
++float rtDdy(float v) { return 0.0f; }
++float2 rtDdx(float2 v) { return float2(0.0f, 0.0f); }
++float2 rtDdy(float2 v) { return float2(0.0f, 0.0f); }
++float3 rtDdx(float3 v) { return float3(0.0f, 0.0f, 0.0f); }
++float3 rtDdy(float3 v) { return float3(0.0f, 0.0f, 0.0f); }
++float4 rtDdx(float4 v) { return float4(0.0f, 0.0f, 0.0f, 0.0f); }
++float4 rtDdy(float4 v) { return float4(0.0f, 0.0f, 0.0f, 0.0f); }
++#else
++float rtDdx(float v) { return ddx(v); }
++float rtDdy(float v) { return ddy(v); }
++float2 rtDdx(float2 v) { return ddx(v); }
++float2 rtDdy(float2 v) { return ddy(v); }
++float3 rtDdx(float3 v) { return ddx(v); }
++float3 rtDdy(float3 v) { return ddy(v); }
++float4 rtDdx(float4 v) { return ddx(v); }
++float4 rtDdy(float4 v) { return ddy(v); }
++#endif
++
+ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float2 vertexUV, float4 vertexSmoothColor, float4 vertexFlatColor,
+     bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
+ {
+@@ -88,6 +123,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         }
+     }
+ 
++#ifndef RASTER_PS_SAFE
++    // Port DK64-Recomp Android: skipped entirely in the SAFE permutation. The check
++    // reads the background depth buffer and uses screen-space derivatives, neither
++    // of which exists in the fallback. Decals lose their depth tolerance, which can
++    // introduce minor z-fighting on decal geometry (shadows, grass overlays), but
++    // the depth test of the pipeline still rejects fully occluded decals.
+     if (depthDecal) {
+         // Sample the depth buffer for this pixel to compare for the decal check.
+         int2 pixelPos = floor(vertexPosition.xy);
+@@ -100,7 +141,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+             dz = instanceRDPParams[instanceIndex].primDepth.y;
+         }
+         else {
+-            dz = (abs(ddx(vertexPosition.z)) + abs(ddy(vertexPosition.z))) * FbParams.resolutionScale.y;
++            dz = (abs(rtDdx(vertexPosition.z)) + abs(rtDdy(vertexPosition.z))) * FbParams.resolutionScale.y;
+         }
+ 
+         // Perform the decal depth tolerance check.
+@@ -110,25 +151,38 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+             return false;
+         }
+     }
++#endif
+     
+-    float2 ddxVertexUV = ddx(vertexUV);
+-    float2 ddyVertexUV = ddy(vertexUV);
++    float2 ddxVertexUV = rtDdx(vertexUV);
++    float2 ddyVertexUV = rtDdy(vertexUV);
+     float2 lowResUV = vertexUV;
++#ifndef RASTER_PS_SAFE
++    // Port DK64-Recomp Android: dead code in the SAFE permutation (the derivatives
++    // above are zero, so the correction subtracts nothing) but it still generates
++    // code; keep the fallback module as small as possible.
+     if (!renderFlagUpscale2D(rp.flags)) {
+         float2 screenPos = floor(vertexPosition.xy);
+         screenPos.x += FbParams.horizontalMisalignment;
+         lowResUV -= fmod(screenPos.xy, FbParams.resolutionScale.yy) * float2(ddxVertexUV.x, ddyVertexUV.y);
+     }
++#endif
+     
+     int tileIndex0 = 0;
+     int tileIndex1 = 1;
+     float lodFraction;
++#ifdef RASTER_PS_SAFE
++    // Port DK64-Recomp Android: the LOD derivation divides by screen-space
++    // derivatives (log2 of zero gradients is undefined), so the SAFE permutation
++    // pins the tile selection to the base level instead of calling computeLOD.
++    lodFraction = 0.0f;
++#else
+     float lodScale = 1.0f;
+     if (!renderFlagUpscaleLOD(rp.flags)) {
+         lodScale = FbParams.resolutionScale.y;
+     }
+     
+     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
++#endif
+ 
+     float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+@@ -290,8 +344,17 @@ void PSMain(
  #if defined(DYNAMIC_RENDER_PARAMS)
      , bool isFrontFace : SV_IsFrontFace
  #endif
@@ -1146,7 +1423,7 @@ index e7895c3..a57ab1a
  )
  {
  #if !defined(DYNAMIC_RENDER_PARAMS)
-@@ -307,7 +316,18 @@ void PSMain(
+@@ -307,7 +370,18 @@ void PSMain(
          discard;
      }
  
@@ -1166,3 +1443,98 @@ index e7895c3..a57ab1a
  }
  #endif
 \ No newline at end of file
+diff --git a/src/shaders/RasterPSSolidPS.hlsl b/src/shaders/RasterPSSolidPS.hlsl
+new file mode 100644
+index 0000000..f21d37b
+--- /dev/null
++++ b/src/shaders/RasterPSSolidPS.hlsl
+@@ -0,0 +1,50 @@
++//
++// RT64 (port DK64-Recomp Android)
++//
++// Last-resort fallback permutation of the raster pixel shader (runtime "rung 3").
++// The proprietary Qualcomm drivers of the Adreno 6xx family deterministically fail
++// the compilation of some of the specialized raster pixel shaders, and the whole
++// pipeline creation with it, which used to leave entire geometry categories
++// unrendered (draws were skipped and the framebuffer stayed black behind them).
++//
++// This permutation carries none of the heavy machinery of RasterPS.hlsl: no
++// texture sampling, no buffers, no derivatives, no coverage math. It shades every
++// pixel with the interpolated vertex color (smooth or flat, picked from the
++// render flags spec constant), so geometry becomes visible with its vertex
++// shading even when every other permutation is rejected by the driver. It is
++// compiled as a single-output shader (the blend factor lives in output 0's alpha
++// channel, like the RASTER_PS_NO_DUAL_SOURCE permutations), which matches the
++// SRC_ALPHA blend state that the pipelines use when dual source blending is
++// considered unreliable.
++//
++// The input interface mirrors RasterPS.hlsl's PSMain (COLOR1 exists only when the
++// VERTEX_FLAT_COLOR permutation is built), so it can be swapped in for any
++// specialized shader without touching the vertex shader or the pipeline layout.
++// Deliberate deviation: COLOR1 is NOT declared with nointerpolation. The raster
++// vertex shaders emit COLOR1 without the Flat decoration (upstream behavior), so
++// a flat-decorated input would recreate the smooth-out/flat-in mismatch that the
++// proprietary Adreno drivers fail to link. Without the modifier the interface is
++// matched on every driver, and the flat color is uniform per primitive on N64
++// content anyway, so the smooth interpolation is visually indistinguishable.
++//
++
++#include "shared/rt64_render_params.h"
++#include "shared/rt64_render_flags.h"
++#include "RenderParamsSpecConstants.hlsli"
++
++void PSMain(
++      in float4 vertexPosition : SV_POSITION
++    , in float2 vertexUV : TEXCOORD
++    , in float4 vertexSmoothColor : COLOR0
++#if defined(VERTEX_FLAT_COLOR)
++    , in float4 vertexFlatColor : COLOR1
++#endif
++    , [[vk::location(0)]] out float4 pixelColor : SV_TARGET0)
++{
++#if !defined(VERTEX_FLAT_COLOR)
++    float4 vertexFlatColor = 0.0f;
++#endif
++    const uint rpFlags = rpFlagsValue;
++    const float4 vertexColor = renderFlagSmoothShade(rpFlags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
++    pixelColor = float4(vertexColor.rgb, vertexColor.a);
++}
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+old mode 100644
+new mode 100755
+index 1ceb2ce..da9bebe
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -148,7 +148,16 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+     int2 texelBaseInt = floor(uvCoord);
+     bool filtering = or(filterBilerp, linearFiltering);
+     float4 samples[4];
++#ifdef RASTER_PS_SAFE
++    // Port DK64-Recomp Android: the SAFE permutation forces the manual wrap/mirror
++    // sampling path, so the nine-case native sampler switch (and its nine SampleGrad
++    // variants) never reaches the driver that's choking on the shader. The manual
++    // path produces the same filtering on N64 content; the native sampler is a
++    // shortcut that mostly benefits high resolution texture replacements.
++    const uint nativeSampler = NATIVE_SAMPLER_NONE;
++#else
+     const uint nativeSampler = rdpTile.nativeSampler;
++#endif
+     bool gpuTileUsesTMEM = canDecodeTMEM && gpuTileFlagRawTMEM(gpuTile.flags);
+     if ((nativeSampler == NATIVE_SAMPLER_NONE) || gpuTileUsesTMEM) {
+ #if USE_FOR_LOOPS
+@@ -263,7 +272,15 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+     const bool canDecodeTMEM = renderFlagCanDecodeTMEM(renderFlags);
+     const bool usesHDR = renderFlagUsesHDR(renderFlags);
+     const uint nativeSampler = rdpTile.nativeSampler;
++#ifdef RASTER_PS_SAFE
++    // Port DK64-Recomp Android: the SAFE permutation has no screen-space
++    // derivatives, so the mip level derivation below (log2 of zero gradients) is
++    // undefined. Pin the sampling to the base level: mipmapped tiles lose their
++    // per-pixel LOD, which only N64 LOD-blended effects use on this content.
++    const bool flagHasMipmaps = false;
++#else
+     const bool flagHasMipmaps = gpuTileFlagHasMipmaps(gpuTile.flags);
++#endif
+     uint numRDPSamples = 0;
+     uint RDPMipLevels[2];
+     RDPMipLevels[0] = 0;
