@@ -238,8 +238,86 @@ index 3227ab1..b41e64b 100644
              if (processCursor >= 0) {
                  std::unique_lock<std::mutex> threadLock(threadMutex);
                  const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 9fae0d4..c369ea3 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -543,7 +543,14 @@ namespace RT64 {
+                 }
+ 
+                 const auto &triangles = drawCall.triangles;
+-                assert(triangles.pipeline != nullptr);
++
++                // Port DK64-Recomp Android: pipelines can be legitimately missing when
++                // every creation path failed on a broken driver. Plume skips the bind
++                // and the draw of null pipelines gracefully, so drop the call instead
++                // of asserting (which would abort debug builds).
++                if (triangles.pipeline == nullptr) {
++                    continue;
++                }
+ 
+                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
+                 if (triangles.scissor.isEmpty()) {
+@@ -579,7 +586,13 @@ namespace RT64 {
+                 drawCallTriangles(drawCall);
+ 
+                 // Simulate dither noise.
+-                if (triangles.postBlendDitherNoise) {
++                // Port DK64-Recomp Android: only draw the dither noise when the main
++                // pipeline actually rendered. If the main pipeline is broken (a driver
++                // whose pipeline creation failed), the draws are skipped by plume and
++                // drawing the noise on top would leave dithered speckles floating on
++                // an empty framebuffer.
++                const bool mainPipelineValid = (triangles.pipeline != nullptr) && triangles.pipeline->isValid();
++                if (mainPipelineValid && triangles.postBlendDitherNoise) {
+                     if (triangles.postBlendDitherNoiseNegative) {
+                         worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
+                     }
+@@ -1608,15 +1621,36 @@ namespace RT64 {
+                         triangles.shaderDesc = call.shaderDesc;
+ 
+                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
+-                        if (gpuShader != nullptr) {
++                        const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
++                        const RenderPipeline *uberPipeline = rasterShaderUber->getPipeline(
++                            !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
++                            !copyMode && call.shaderDesc.otherMode.zUpd(),
++                            (call.shaderDesc.otherMode.cvgDst() == CVG_DST_WRAP) || (call.shaderDesc.otherMode.cvgDst() == CVG_DST_SAVE));
++
++                        // Port DK64-Recomp Android: on drivers where the uber shader
++                        // pipelines are unavailable (see RasterShaderUber), the draw
++                        // would otherwise be left without a pipeline until the
++                        // asynchronous compilation finishes. Build the specialized
++                        // shader synchronously in that case so rendering keeps going.
++                        if (!p.ubershadersOnly && (gpuShader == nullptr) && ((uberPipeline == nullptr) || !uberPipeline->isValid())) {
++                            gpuShader = p.rasterShaderCache->getOrCreateGPUShaderNow(call.shaderDesc);
++                        }
++
++                        // Prefer a working pipeline in this order: specialized (the
++                        // optimized path), uber (the compatibility path), then anything
++                        // left over. Invalid pipelines are tolerated because plume skips
++                        // their binds and draws gracefully instead of crashing.
++                        if ((gpuShader != nullptr) && (gpuShader->pipeline != nullptr) && gpuShader->pipeline->isValid()) {
++                            triangles.pipeline = gpuShader->pipeline.get();
++                        }
++                        else if ((uberPipeline != nullptr) && uberPipeline->isValid()) {
++                            triangles.pipeline = uberPipeline;
++                        }
++                        else if (gpuShader != nullptr) {
+                             triangles.pipeline = gpuShader->pipeline.get();
+                         }
+                         else {
+-                            const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
+-                            triangles.pipeline = rasterShaderUber->getPipeline(
+-                                !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
+-                                !copyMode && call.shaderDesc.otherMode.zUpd(),
+-                                (call.shaderDesc.otherMode.cvgDst() == CVG_DST_WRAP) || (call.shaderDesc.otherMode.cvgDst() == CVG_DST_SAVE));
++                            triangles.pipeline = nullptr;
+                         }
+                         
+                         triangles.faceCount = call.callDesc.triangleCount;
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
-index 721a01e..f033104 100644
+index 721a01e..ad2414c 100644
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
 @@ -16,6 +16,8 @@
@@ -441,17 +519,35 @@ index 721a01e..f033104 100644
      RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
          const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
      {
-@@ -134,6 +305,19 @@ namespace RT64 {
+@@ -95,6 +266,8 @@ namespace RT64 {
+         const bool useMSAA = (multisampling.sampleCount > 1);
+         std::unique_ptr<RenderShader> vertexShader;
+         std::unique_ptr<RenderShader> pixelShader;
++        size_t vertexShaderSize = 0;
++        size_t pixelShaderSize = 0;
+ #ifdef __APPLE__
+         std::vector<RenderSpecConstant> specConstants;
+ #endif
+@@ -134,8 +307,32 @@ namespace RT64 {
              bool psRun = respv::Optimizer::run(*PS, specConstants.data(), uint32_t(specConstants.size()), optimizedPS);
              assert(vsRun && psRun && "Shader optimization must always succeed as the inputs are always the same.");
  
 +            // Flat shading compatibility: drop the Flat decorations when the driver can't
-+            // link them. The optimizer already removes the flat input on the smooth shaded
-+            // permutations, so only the flat permutations end up being rewritten here.
++            // link them. Both stages are rewritten so the shader interface stays matched:
++            // the raster vertex shaders never carry a Flat output (the "flat" permutations
++            // only control whether the COLOR1 varying exists), but stripping both sides
++            // keeps that guarantee even if a future shader version emits one.
 +            if (!g_FlatShadingSupported) {
-+                std::vector<uint8_t> strippedPS;
-+                if (stripFlatDecorationsFromSPIRV(optimizedPS.data(), optimizedPS.size(), strippedPS)) {
-+                    optimizedPS = std::move(strippedPS);
++                std::vector<uint8_t> strippedData;
++                if (stripFlatDecorationsFromSPIRV(optimizedVS.data(), optimizedVS.size(), strippedData)) {
++                    optimizedVS = std::move(strippedData);
++                }
++                else {
++                    fprintf(stderr, "RT64: failed to strip flat decorations from a specialized raster vertex shader.\n");
++                }
++
++                if (stripFlatDecorationsFromSPIRV(optimizedPS.data(), optimizedPS.size(), strippedData)) {
++                    optimizedPS = std::move(strippedData);
 +                }
 +                else {
 +                    fprintf(stderr, "RT64: failed to strip flat decorations from a specialized raster pixel shader.\n");
@@ -460,17 +556,45 @@ index 721a01e..f033104 100644
 +
              vertexShader = device->createShader(optimizedVS.data(), optimizedVS.size(), "VSMain", shaderFormat);
              pixelShader = device->createShader(optimizedPS.data(), optimizedPS.size(), "PSMain", shaderFormat);
++            vertexShaderSize = optimizedVS.size();
++            pixelShaderSize = optimizedPS.size();
          }
-@@ -441,8 +625,24 @@ namespace RT64 {
+         else if (shaderFormat == RenderShaderFormat::METAL) {
+ #       ifdef __APPLE__
+@@ -237,6 +434,14 @@ namespace RT64 {
+ #endif
+         creation.multisampling = multisampling;
+         pipeline = createPipeline(creation);
++
++        if ((pipeline == nullptr) || !pipeline->isValid()) {
++            // Port DK64-Recomp Android: the creation of the specialized shaders is the
++            // only pipeline creation that happens while the game is running, so log
++            // enough state to identify the failing combination in a logcat.
++            fprintf(stderr, "RT64: specialized raster shader (hash %016llX, smoothShade %d, msaa %u) failed to be created (VS %zu B, PS %zu B).\n",
++                (unsigned long long)desc.hash(), int(desc.flags.smoothShade), uint32_t(multisampling.sampleCount), vertexShaderSize, pixelShaderSize);
++        }
+     }
+ 
+     RasterShader::~RasterShader() { }
+@@ -441,8 +646,38 @@ namespace RT64 {
              return;
          }
  
 +        // Flat shading compatibility: rewrite the uber pixel shader without the Flat
 +        // decorations when the driver can't link them (see RasterShader::detectFlatShadingSupport).
 +        // The vertex shader never carries Flat decorations, so it's used as-is.
++        // Port DK64-Recomp Android: drivers that report an unreliable uber shader get
++        // no uber pipelines at all. Their proprietary shader compiler was verified to
++        // reject the uber pixel shader at the final codegen stage even without Flat
++        // decorations (VK_ERROR_INITIALIZATION_FAILED, "Shader compilation failed"),
++        // and every failed vkCreateGraphicsPipelines call leaves the driver in an
++        // unhealthy state. The pipeline layout and the vertex shader are still built
++        // because the specialized shaders share them and the post blend pipelines
++        // (which were verified to work) are built on the vertex shader.
++        const bool uberPipelinesAllowed = (shaderFormat != RenderShaderFormat::SPIRV) || device->getCapabilities().uberShaderReliable;
 +        const void *PSBlobStripped = PSBlob;
 +        uint32_t PSBlobStrippedSize = PSBlobSize;
-+        if ((shaderFormat == RenderShaderFormat::SPIRV) && !g_FlatShadingSupported) {
++        if (uberPipelinesAllowed && (shaderFormat == RenderShaderFormat::SPIRV) && !g_FlatShadingSupported) {
 +            std::vector<uint8_t> strippedUberPS;
 +            if (stripFlatDecorationsFromSPIRV(PSBlob, PSBlobSize, strippedUberPS)) {
 +                PSBlobStripped = strippedUberPS.data();
@@ -483,11 +607,37 @@ index 721a01e..f033104 100644
 +
          vertexShader = device->createShader(VSBlob, VSBlobSize, "VSMain", shaderFormat);
 -        pixelShader = device->createShader(PSBlob, PSBlobSize, "PSMain", shaderFormat);
-+        pixelShader = device->createShader(PSBlobStripped, PSBlobStrippedSize, "PSMain", shaderFormat);
++        if (uberPipelinesAllowed) {
++            pixelShader = device->createShader(PSBlobStripped, PSBlobStrippedSize, "PSMain", shaderFormat);
++        }
++        else {
++            fprintf(stderr, "RT64: skipping the raster uber shader pipelines on this driver; specialized shaders will be created on demand instead.\n");
++        }
  
          FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
          FramebufferRendererDescriptorTextureSet descriptorTextureSet;
-@@ -484,6 +684,10 @@ namespace RT64 {
+@@ -460,7 +695,7 @@ namespace RT64 {
+         // Generate all possible combinations of pipeline creations and assign them to each thread. Skip the ones that are invalid.
+         uint32_t pipelineCount = uint32_t(std::size(pipelines));
+         pipelineThreadCreations.clear();
+-        pipelineThreadCreations.resize(std::min(threadCount, pipelineCount));
++        pipelineThreadCreations.resize(uberPipelinesAllowed ? std::min(threadCount, pipelineCount) : 0);
+ 
+         PipelineCreation creation;
+         creation.device = device;
+@@ -474,16 +709,20 @@ namespace RT64 {
+         creation.multisampling = multisampling;
+ 
+         uint32_t threadIndex = 0;
+-        for (uint32_t i = 0; i < pipelineCount; i++) {
++        for (uint32_t i = 0; uberPipelinesAllowed && (i < pipelineCount); i++) {
+             creation.zCmp = i & (1 << 0);
+             creation.zUpd = i & (1 << 1);
+             creation.cvgAdd = i & (1 << 2);
+ 
+             pipelineThreadCreations[threadIndex].emplace_back(creation);
+-            threadIndex = (threadIndex + 1) % threadCount;
++            threadIndex = (threadIndex + 1) % uint32_t(pipelineThreadCreations.size());
          }
  
          // Spawn the threads that will compile all the pipelines.
@@ -498,7 +648,7 @@ index 721a01e..f033104 100644
          pipelineThreads.clear();
          pipelineThreads.resize(pipelineThreadCreations.size());
          for (uint32_t i = 0; i < uint32_t(pipelineThreads.size()); i++) {
-@@ -503,9 +707,9 @@ namespace RT64 {
+@@ -503,9 +742,9 @@ namespace RT64 {
              break;
  #   endif
          case RenderShaderFormat::SPIRV:
@@ -511,7 +661,7 @@ index 721a01e..f033104 100644
              break;
  #   ifdef __APPLE__
          case RenderShaderFormat::METAL:
-@@ -552,6 +756,10 @@ namespace RT64 {
+@@ -552,6 +791,10 @@ namespace RT64 {
  
          postBlendDesc.pixelShader = postBlendSubNegativePixelShader.get();
          postBlendDitherNoiseSubNegativePipeline = device->createGraphicsPipeline(postBlendDesc);
@@ -522,7 +672,7 @@ index 721a01e..f033104 100644
      }
  
      RasterShaderUber::~RasterShaderUber() {
-@@ -559,27 +767,34 @@ namespace RT64 {
+@@ -559,27 +802,34 @@ namespace RT64 {
      }
  
      void RasterShaderUber::threadCreatePipelines(uint32_t threadIndex) {
@@ -590,10 +740,43 @@ index 3b991ff..c8ced9f 100644
          std::vector<std::vector<PipelineCreation>> pipelineThreadCreations;
          std::vector<std::unique_ptr<std::thread>> pipelineThreads;
 diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
-index bf7b669..e5f00c5 100644
+index bf7b669..6a8aa57 100644
 --- a/src/render/rt64_raster_shader_cache.cpp
 +++ b/src/render/rt64_raster_shader_cache.cpp
-@@ -98,6 +98,10 @@ namespace RT64 {
+@@ -58,13 +58,31 @@ namespace RT64 {
+             // Compile the shader at the top of the queue.
+             if (fromPriorityQueue) {
+                 assert((shaderCache->shaderUber != nullptr) && "Ubershader should've been created by the time a new shader is submitted to the cache.");
++
++                {
++                    // Port DK64-Recomp Android: the draw path can create the shader
++                    // synchronously when no uber pipeline is available to fall back
++                    // on. Skip shaders that already exist so no work is duplicated.
++                    const std::unique_lock<std::mutex> lock(shaderCache->GPUShadersMutex);
++                    if (shaderCache->GPUShaders.find(shaderDesc.hash()) != shaderCache->GPUShaders.end()) {
++                        continue;
++                    }
++                }
++
+                 const RenderPipelineLayout *uberPipelineLayout = shaderCache->shaderUber->pipelineLayout.get();
+                 const RenderMultisampling multisampling = shaderCache->multisampling;
+                 std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCache->shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
+ 
+                 {
++                    // Port DK64-Recomp Android: only insert when no entry exists yet.
++                    // The draw path can create the same shader synchronously while this
++                    // background compilation was running, and the render thread may
++                    // already be using the pipeline of the synchronous copy. Overwriting
++                    // the entry would destroy a VkPipeline that is still in flight.
+                     const std::unique_lock<std::mutex> lock(shaderCache->GPUShadersMutex);
+-                    shaderCache->GPUShaders[shaderDesc.hash()] = std::move(newShader);
++                    if (shaderCache->GPUShaders.find(shaderDesc.hash()) == shaderCache->GPUShaders.end()) {
++                        shaderCache->GPUShaders[shaderDesc.hash()] = std::move(newShader);
++                    }
+                 }
+             }
+         }
+@@ -98,6 +116,10 @@ namespace RT64 {
      void RasterShaderCache::setup(RenderDevice *device, RenderShaderFormat shaderFormat, const ShaderLibrary *shaderLibrary, const RenderMultisampling &multisampling) {
          assert(device != nullptr);
  
@@ -604,6 +787,71 @@ index bf7b669..e5f00c5 100644
          this->device = device;
          this->shaderFormat = shaderFormat;
          this->multisampling = multisampling;
+@@ -171,6 +193,44 @@ namespace RT64 {
+         return shaderIt->second.get();
+     }
+ 
++    // Port DK64-Recomp Android: builds a specialized shader in the calling thread
++    // instead of waiting for the background compilation queue. Used when no uber
++    // pipeline exists to cover the draw while the asynchronous shader is being
++    // built (drivers where uber pipelines are unavailable), so the draw is never
++    // left without a pipeline. Concurrent creations of the same shader are
++    // serialized here and deduplicated against the asynchronous queue.
++    RasterShader *RasterShaderCache::getOrCreateGPUShaderNow(const ShaderDescription &desc) {
++        assert((shaderUber != nullptr) && "The uber shader must exist before specialized shaders can be created.");
++        assert((device != nullptr) && "The cache must be set up before shaders can be created.");
++
++        const uint64_t shaderHash = desc.hash();
++
++        const std::unique_lock<std::mutex> creationLock(synchronousCreationMutex);
++
++        {
++            const std::unique_lock<std::mutex> lock(GPUShadersMutex);
++            auto shaderIt = GPUShaders.find(shaderHash);
++            if (shaderIt != GPUShaders.end()) {
++                return shaderIt->second.get();
++            }
++        }
++
++        const RenderPipelineLayout *uberPipelineLayout = shaderUber->pipelineLayout.get();
++        std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(device, desc, uberPipelineLayout, shaderFormat, multisampling, shaderCompiler.get(), &optimizerCacheSPIRV);
++
++        const std::unique_lock<std::mutex> lock(GPUShadersMutex);
++        auto shaderIt = GPUShaders.find(shaderHash);
++        if (shaderIt != GPUShaders.end()) {
++            // An asynchronous compilation finished while this shader was being built.
++            // The existing entry wins so the map never churns on the same key.
++            return shaderIt->second.get();
++        }
++
++        RasterShader *shaderPointer = newShader.get();
++        GPUShaders[shaderHash] = std::move(newShader);
++        return shaderPointer;
++    }
++
+     RasterShaderUber *RasterShaderCache::getGPUShaderUber() const {
+         return shaderUber.get();
+     }
+diff --git a/src/render/rt64_raster_shader_cache.h b/src/render/rt64_raster_shader_cache.h
+index 5c40c18..ed0353a 100644
+--- a/src/render/rt64_raster_shader_cache.h
++++ b/src/render/rt64_raster_shader_cache.h
+@@ -39,6 +39,7 @@ namespace RT64 {
+         std::unordered_map<uint64_t, std::unique_ptr<RasterShader>> GPUShaders;
+         std::mutex GPUShadersMutex;
+         std::list<std::unique_ptr<CompilationThread>> compilationThreads;
++        std::mutex synchronousCreationMutex;
+         uint32_t threadCount;
+         uint32_t ubershaderThreadCount;
+         RenderShaderFormat shaderFormat;
+@@ -53,6 +54,7 @@ namespace RT64 {
+         void waitForAll();
+         void destroyAll();
+         RasterShader *getGPUShader(const ShaderDescription &desc);
++        RasterShader *getOrCreateGPUShaderNow(const ShaderDescription &desc);
+         RasterShaderUber *getGPUShaderUber() const;
+         uint32_t shaderCount();
+     };
 diff --git a/src/shaders/FlatProbePS.hlsl b/src/shaders/FlatProbePS.hlsl
 new file mode 100644
 index 0000000..6b4bedb

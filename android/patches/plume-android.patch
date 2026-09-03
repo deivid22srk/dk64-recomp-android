@@ -39,7 +39,7 @@ index 2048557..e8e71bd 100644
  
      struct RenderFramebuffer {
 diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
-index 9dcfedf..8577123 100644
+index 9dcfedf..af656f0 100644
 --- a/plume_render_interface_types.h
 +++ b/plume_render_interface_types.h
 @@ -37,10 +37,13 @@ namespace plume {
@@ -58,7 +58,7 @@ index 9dcfedf..8577123 100644
  #elif defined(__linux__)
      struct RenderWindow {
          Display* display;
-@@ -1780,6 +1783,11 @@ namespace plume {
+@@ -1780,6 +1783,20 @@ namespace plume {
          bool descriptorIndexing = false;
          bool scalarBlockLayout = false;
  
@@ -67,11 +67,20 @@ index 9dcfedf..8577123 100644
 +        // (e.g. the proprietary Qualcomm Adreno 6xx Vulkan drivers).
 +        bool flatShadingReliable = true;
 +
++        // Uber shader pipelines. Backends report false on drivers known to fail
++        // the final shader codegen of the very large raster uber pixel shader
++        // ("Shader compilation failed" followed by VK_ERROR_INITIALIZATION_FAILED,
++        // verified on the proprietary Qualcomm Adreno 619 Vulkan driver, where the
++        // same vertex shader links and compiles fine in the smaller post blend
++        // pipelines). Applications must then fall back to specialized shaders
++        // created on demand instead of relying on the uber pipelines.
++        bool uberShaderReliable = true;
++
          // Buffers.
          bool bufferDeviceAddress = false;
          
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index f1dd503..50fbb8c 100644
+index f1dd503..690c083 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -10,6 +10,24 @@
@@ -367,7 +376,99 @@ index f1dd503..50fbb8c 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkGetQueryPoolResults failed with error code 0x%X.\n", res);
              return;
-@@ -2942,20 +3135,40 @@ namespace plume {
+@@ -2795,6 +2988,12 @@ namespace plume {
+     void VulkanCommandList::begin() {
+         vkResetCommandBuffer(vk, 0);
+ 
++        // A fresh recording starts with no bound state (vkResetCommandBuffer discards
++        // everything the previous submission had bound).
++        graphicsPipelineBound = false;
++        graphicsDescriptorSetMask = 0;
++        computePipelineBound = false;
++
+         VkCommandBufferBeginInfo beginInfo = {};
+         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+@@ -2819,6 +3018,12 @@ namespace plume {
+         activeComputePipelineLayout = nullptr;
+         activeGraphicsPipelineLayout = nullptr;
+         activeRaytracingPipelineLayout = nullptr;
++
++        // The bind state the command buffer carried is discarded together with the
++        // recording, so the tracking flags must not leak into the next submission.
++        graphicsPipelineBound = false;
++        graphicsDescriptorSetMask = 0;
++        computePipelineBound = false;
+     }
+ 
+     void VulkanCommandList::barriers(RenderBarrierStages stages, const RenderBufferBarrier *bufferBarriers, uint32_t bufferBarriersCount, const RenderTextureBarrier *textureBarriers, uint32_t textureBarriersCount) {
+@@ -2888,6 +3093,14 @@ namespace plume {
+     void VulkanCommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
+         assert(activeComputePipelineLayout != nullptr);
+ 
++        // Port DK64-Recomp Android: same rationale as the draw guards — recording a
++        // dispatch without a valid compute pipeline is undefined behavior that can
++        // crash fragile drivers.
++        if (!computePipelineBound) {
++            warnOnce("VulkanCommandList: skipping dispatch without a valid compute pipeline.");
++            return;
++        }
++
+         vkCmdDispatch(vk, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+     }
+ 
+@@ -2929,6 +3142,27 @@ namespace plume {
+         assert(activeGraphicsPipelineLayout != nullptr);
+         checkActiveRenderPass();
+ 
++        // Port DK64-Recomp Android: drawing without a fully bound graphics state is
++        // undefined behavior that crashes proprietary Adreno drivers inside
++        // vkCmdDraw (null pointer dereference at fixed offsets). Every draw reached
++        // this point with a complete state on drivers where nothing failed, so the
++        // guards below only ever skip work that would have crashed or misdrawn.
++        if (!graphicsPipelineBound) {
++            warnOnce("VulkanCommandList: skipping draw without a valid graphics pipeline.");
++            return;
++        }
++
++        if (activeGraphicsPipelineLayout != nullptr) {
++            const uint32_t requiredSetCount = uint32_t(activeGraphicsPipelineLayout->descriptorSetLayouts.size());
++            if (requiredSetCount > 0) {
++                const uint32_t requiredSetMask = (requiredSetCount >= 32) ? UINT32_MAX : ((uint32_t(1) << requiredSetCount) - 1);
++                if ((graphicsDescriptorSetMask & requiredSetMask) != requiredSetMask) {
++                    warnOnce("VulkanCommandList: skipping draw with descriptor sets missing.");
++                    return;
++                }
++            }
++        }
++
+         vkCmdDraw(vk, vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
+     }
+     
+@@ -2936,26 +3170,69 @@ namespace plume {
+         assert(activeGraphicsPipelineLayout != nullptr);
+         checkActiveRenderPass();
+ 
++        // See drawInstanced for the rationale of these guards.
++        if (!graphicsPipelineBound) {
++            warnOnce("VulkanCommandList: skipping indexed draw without a valid graphics pipeline.");
++            return;
++        }
++
++        if (activeGraphicsPipelineLayout != nullptr) {
++            const uint32_t requiredSetCount = uint32_t(activeGraphicsPipelineLayout->descriptorSetLayouts.size());
++            if (requiredSetCount > 0) {
++                const uint32_t requiredSetMask = (requiredSetCount >= 32) ? UINT32_MAX : ((uint32_t(1) << requiredSetCount) - 1);
++                if ((graphicsDescriptorSetMask & requiredSetMask) != requiredSetMask) {
++                    warnOnce("VulkanCommandList: skipping indexed draw with descriptor sets missing.");
++                    return;
++                }
++            }
++        }
++
+         vkCmdDrawIndexed(vk, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+     }
+ 
      void VulkanCommandList::setPipeline(const RenderPipeline *pipeline) {
          assert(pipeline != nullptr);
  
@@ -376,6 +477,8 @@ index f1dd503..50fbb8c 100644
 +            // gracefully instead of crashing: upstream callers hand over the raw
 +            // pipeline pointer without checking it for null.
 +            warnOnce("VulkanCommandList: skipping bind of a null pipeline.");
++            graphicsPipelineBound = false;
++            computePipelineBound = false;
 +            return;
 +        }
 +
@@ -385,18 +488,22 @@ index f1dd503..50fbb8c 100644
              const VulkanComputePipeline *computePipeline = static_cast<const VulkanComputePipeline *>(interfacePipeline);
 +            if (!computePipeline->isValid()) {
 +                warnOnce("VulkanCommandList: skipping bind of an invalid compute pipeline.");
++                computePipelineBound = false;
 +                return;
 +            }
              vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline->vk);
++            computePipelineBound = true;
              break;
          }
          case VulkanPipeline::Type::Graphics: {
              const VulkanGraphicsPipeline *graphicsPipeline = static_cast<const VulkanGraphicsPipeline *>(interfacePipeline);
 +            if (!graphicsPipeline->isValid()) {
 +                warnOnce("VulkanCommandList: skipping bind of an invalid graphics pipeline.");
++                graphicsPipelineBound = false;
 +                return;
 +            }
              vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline->vk);
++            graphicsPipelineBound = true;
              break;
          }
          case VulkanPipeline::Type::Raytracing: {
@@ -408,7 +515,22 @@ index f1dd503..50fbb8c 100644
              vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, raytracingPipeline->vk);
              break;
          }
-@@ -3494,6 +3707,12 @@ namespace plume {
+@@ -2986,6 +3263,14 @@ namespace plume {
+     void VulkanCommandList::setGraphicsPipelineLayout(const RenderPipelineLayout *pipelineLayout) {
+         assert(pipelineLayout != nullptr);
+ 
++        // Descriptor sets bound for the previous layout are not guaranteed to be
++        // compatible with the new one, so the bound set tracking is dropped. RT64
++        // always rebinds its sets after switching layouts, so this never skips a
++        // draw that would have rendered.
++        if (activeGraphicsPipelineLayout != static_cast<const VulkanPipelineLayout *>(pipelineLayout)) {
++            graphicsDescriptorSetMask = 0;
++        }
++
+         activeGraphicsPipelineLayout = static_cast<const VulkanPipelineLayout *>(pipelineLayout);
+     }
+ 
+@@ -3494,7 +3779,21 @@ namespace plume {
          assert(setIndex < pipelineLayout->descriptorSetLayouts.size());
  
          const VulkanDescriptorSet *interfaceSet = static_cast<const VulkanDescriptorSet *>(descriptorSet);
@@ -419,9 +541,18 @@ index f1dd503..50fbb8c 100644
 +            return;
 +        }
          vkCmdBindDescriptorSets(vk, bindPoint, pipelineLayout->vk, setIndex, 1, &interfaceSet->vk, 0, nullptr);
++
++        // Track the bound sets of the graphics bind point so draws can be skipped
++        // while required sets are missing (see drawInstanced).
++        if (bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
++            if (setIndex < 32) {
++                graphicsDescriptorSetMask |= (uint32_t(1) << setIndex);
++            }
++        }
      }
  
-@@ -3921,6 +4140,20 @@ namespace plume {
+     // VulkanCommandFence
+@@ -3921,6 +4220,20 @@ namespace plume {
              vkGetPhysicalDeviceProperties2(physicalDevice, &deviceProperties2);
          }
  
@@ -442,7 +573,7 @@ index f1dd503..50fbb8c 100644
          // Build the device creation chain.
          void *createDeviceChain = nullptr;
          const bool rayTracingSupported = rayTracingPipelineFeatures.rayTracingPipeline && accelerationStructureFeatures.accelerationStructure;
-@@ -4131,7 +4364,22 @@ namespace plume {
+@@ -4131,7 +4444,22 @@ namespace plume {
          capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
          capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
          capabilities.presentWait = presentWaitSupported;
@@ -465,7 +596,7 @@ index f1dd503..50fbb8c 100644
          capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
          capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
          capabilities.dynamicDepthBias = true;
-@@ -4139,6 +4387,17 @@ namespace plume {
+@@ -4139,6 +4467,27 @@ namespace plume {
          capabilities.uma = (description.type == RenderDeviceType::INTEGRATED) && hasHostVisibleDeviceLocalMemory;
          capabilities.gpuUploadHeap = capabilities.uma;
  
@@ -480,10 +611,20 @@ index f1dd503..50fbb8c 100644
 +        // for N64 content in the common case.
 +        capabilities.flatShadingReliable = !((physicalDeviceProperties.vendorID == 0x5143) && (driverProperties.driverID != VK_DRIVER_ID_MESA_TURNIP));
 +
++        // Port DK64-Recomp Android: the proprietary Qualcomm Vulkan drivers of this
++        // family also fail the final shader codegen of the ~113 KB raster uber pixel
++        // shader (vkCreateGraphicsPipelines returns VK_ERROR_INITIALIZATION_FAILED
++        // right after the driver logs "Shader compilation failed for shaderType: 1").
++        // The uber vertex shader is fine (the post blend pipelines built on it succeed),
++        // so only the uber pipeline family is affected. Specialized shaders compiled
++        // per state are much smaller and were observed to work, so applications can
++        // use them as the primary raster path when this capability is false.
++        capabilities.uberShaderReliable = capabilities.flatShadingReliable;
++
  #   if defined(__APPLE__)
          // MoltenVK supports triangle fans but does so via compute shaders to translate to lists, since it has to
          // support all cases including indirect draw. This results in renderpass restarts that can harm performance,
-@@ -4464,11 +4723,30 @@ namespace plume {
+@@ -4464,11 +4813,30 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -515,7 +656,7 @@ index f1dd503..50fbb8c 100644
          appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
          appInfo.pApplicationName = "plume";
 diff --git a/plume_vulkan.h b/plume_vulkan.h
-index 0a1edbe..b8245da 100644
+index 0a1edbe..f7607c1 100644
 --- a/plume_vulkan.h
 +++ b/plume_vulkan.h
 @@ -146,6 +146,7 @@ namespace plume {
@@ -569,3 +710,20 @@ index 0a1edbe..b8245da 100644
          void setVsyncEnabled(bool vsyncEnabled) override;
          bool isVsyncEnabled() const override;
          uint32_t getWidth() const override;
+@@ -303,6 +312,16 @@ namespace plume {
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
+ 
++        // Port DK64-Recomp Android: tracks whether the graphics bind point is in a
++        // state the driver can safely draw with. Drivers of the Adreno 6xx family
++        // crash inside vkCmdDraw/vkCmdDrawIndexed (null pointer dereference) when a
++        // draw is recorded without a valid pipeline or with descriptor sets missing,
++        // which happens when a pipeline creation or a descriptor allocation failed.
++        // Recording is skipped instead so the frame degrades gracefully.
++        bool graphicsPipelineBound = false;
++        uint32_t graphicsDescriptorSetMask = 0;
++        bool computePipelineBound = false;
++
+         VulkanCommandList(VulkanCommandQueue *queue);
+         ~VulkanCommandList() override;
+         void begin() override;
