@@ -16,6 +16,55 @@ index 467c01b..114d42c 100644
  #define SLOT_MAP_FREE(ptr) free(ptr)
  #endif
  
+diff --git a/recompui/src/base/ui_launcher.cpp b/recompui/src/base/ui_launcher.cpp
+index 6de7a94..0937ead 100644
+--- a/recompui/src/base/ui_launcher.cpp
++++ b/recompui/src/base/ui_launcher.cpp
+@@ -8,6 +8,13 @@
+ #include "ultramodern/ultramodern.hpp"
+ #include "nfd.h"
+ #include <filesystem>
++#if defined(__ANDROID__)
++// Port Android: reinício limpo do app após a seleção da ROM (ver callback
++// do add_start_game_or_load_rom_option abaixo). Compilado dentro do
++// libmain.so; o include é resolvido pelo target_include_directories do
++// recompui no CMake do app (android/app/CMakeLists.txt).
++#include "app_restart.h"
++#endif
+ #include "elements/ui_svg.h"
+ #include "elements/ui_config_page.h"
+ #include "ui_utils.h"
+@@ -474,6 +481,30 @@ namespace recompui {
+                         if (opened) {
+                             ui_context.close();
+                         }
++
++#if defined(__ANDROID__)
++                        /*
++                         * Port Android (crash na 1ª inicialização): depois de
++                         * escolher a ROM pelo DocumentsUI o processo ficou em
++                         * um estado que o "Start Game" na MESMA sessão não
++                         * sobrevive — a surface Vulkan foi destruída/recriada
++                         * pelo ciclo do seletor (present queue congelada +
++                         * invalidateSurface/resize) e a validação da ROM rodou
++                         * I/O pesado na render thread. Reiniciar o app põe o
++                         * "Start Game" num processo limpo: VkInstance nova,
++                         * driver recarregado, estáticos zerados — o MESMO
++                         * princípio já aplicado pelo menu "GPU Driver"
++                         * (app_restart.cpp: o plume/RT64 só inicializa o
++                         * Vulkan uma vez por processo). O relaunch é
++                         * automático (alarme de +1.5s agendado no Java) e a
++                         * ROM já está armazenada/validada: o menu reabre
++                         * direto em "Start Game". Na 2ª execução (ROM vinda
++                         * do config) este ramo NÃO roda — o fluxo atual
++                         * comprovadamente estável é preservado.
++                         */
++                        recompui::message_box("ROM loaded successfully.\n\nThe app will now restart to finish setting it up.");
++                        dk64::native_request_app_restart();
++#endif
+                     }
+                 });
+             }
 diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
 index 277a421..ae5a247 100644
 --- a/recompui/src/base/ui_state.cpp

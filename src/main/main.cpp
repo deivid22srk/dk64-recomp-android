@@ -22,6 +22,7 @@
 #include "file_bridge.h"
 #include "virtual_pad.h"
 #include "app_restart.h"
+#include "crash_handler.h"
 #else
 #define SDL_MAIN_HANDLED
 #endif
@@ -787,13 +788,6 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     game_options_menu->add_option("GPU Driver", []() {
         show_android_gpu_driver_menu();
     });
-    // Port Android: "Configurações" do app — tela de logs de diagnóstico
-    // (captura crash-safe de áudio/render/driver/crashes + resumo de erros +
-    // compartilhar). A captura vem DESATIVADA por padrão e é ligada/desligada
-    // NA HORA dentro da tela. Fire-and-forget: nada volta ao menu.
-    game_options_menu->add_option("Logs de diagnóstico", []() {
-        androidport::filedialog::open_diagnostics_screen();
-    });
 #endif
     game_options_menu->set_width(30, recompui::Unit::Percent);
 
@@ -829,6 +823,13 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
 
 int main(int argc, char** argv) {
 #ifdef __ANDROID__
+    // Visibilidade de morte nativa ANTES de qualquer outra inicialização:
+    // SIGSEGV/SIGABRT/terminate passam a registrar a causa no logcat (tag
+    // DK64Recomp-Crash) antes do fluxo padrão de morte do Android — sem
+    // isto, um crash nativo ou uma exceção não capturada fecha o app sem
+    // nenhuma linha diagnosticável (relato "o app fecha sem nada no log").
+    androidport::crash::install();
+
     // Diretórios do app passados pelo MainActivity (SDLActivity::getArguments()).
     androidport::init_from_args(argc, argv);
     // RT64::UserPaths::detectDataPath (src/common/rt64_user_paths.cpp do rt64)

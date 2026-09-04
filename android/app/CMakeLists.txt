@@ -373,6 +373,9 @@ set(MAIN_SOURCES
     # reiniciar deixa a VkInstance ativa em mismatch com o novo ICD que o
     # adrenotools acabou de injetar — SIGSEGV ao iniciar o jogo).
     "${ANDROID_PORT_DIR}/native/compat/app_restart.cpp"
+    # Visibilidade de morte nativa (SIGSEGV/SIGABRT/terminate -> logcat na tag
+    # DK64Recomp-Crash antes do tombstone padrão do Android).
+    "${ANDROID_PORT_DIR}/native/compat/crash_handler.cpp"
     # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
     "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )

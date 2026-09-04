@@ -7,11 +7,9 @@
  *   - por recompui/src/util/file.cpp (patch do port) para open_file_dialog;
  *   - por RecompFrontend/recompui/src/base/ui_state.cpp (patch do port) para
  *     o dispatch por frame no draw_hook;
- *   - por src/main/main.cpp para o fluxo do driver Turnip no launcher E
- *     para a opção "Logs de diagnóstico" do menu (open_diagnostics_screen),
- *     que reusa a MESMA infraestrutura JNI (JavaVM + cache de classe/método)
- *     num fluxo fire-and-forget — a tela de diagnóstico não devolve nada ao
- *     nativo, diferente do SAF que publica nativeOnFilePicked.
+ *   - por src/main/main.cpp para o fluxo do driver Turnip no launcher, que
+ *     reusa a MESMA infraestrutura JNI (JavaVM + cache de classe/método)
+ *     com o Kind::DriverZip — resultado publicado por nativeOnFilePicked.
  */
 #include "file_bridge.h"
 
@@ -52,7 +50,6 @@ JavaVM *g_vm = nullptr;
  */
 jclass g_main_class = nullptr;     // global ref de MainActivity
 jmethodID g_mid_request = nullptr; // MainActivity.requestFilePicker(I)Z
-jmethodID g_mid_diag = nullptr;    // MainActivity.openDiagnosticsScreen()Z
 
 enum class State {
     Idle,    // nenhum pedido em aberto
@@ -77,8 +74,7 @@ bool ensure_jni_cache(JNIEnv *env) {
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_main_class != nullptr && g_mid_request != nullptr
-                && g_mid_diag != nullptr) return true;
+        if (g_main_class != nullptr && g_mid_request != nullptr) return true;
     }
 
     jclass local = env->FindClass(kMainActivity);
@@ -105,20 +101,11 @@ bool ensure_jni_cache(JNIEnv *env) {
         return false;
     }
 
-    jmethodID mid_diag = env->GetStaticMethodID(global, "openDiagnosticsScreen", "()Z");
-    if (mid_diag == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteGlobalRef(global);
-        ALOGE("file bridge: openDiagnosticsScreen()Z não encontrado");
-        return false;
-    }
-
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_main_class == nullptr) {
             g_main_class = global;
             g_mid_request = mid;
-            g_mid_diag = mid_diag;
         } else {
             // Outra thread venceu a corrida: descarta a cópia deste thread.
             env->DeleteGlobalRef(global);
@@ -217,53 +204,6 @@ bool request(Kind kind, Callback callback) {
     }
     if (failed) failed(false, std::string{});
     return false;
-}
-
-/*
- * Abre a tela Java de diagnóstico (DiagnosticsActivity) — opção "Logs de
- * diagnóstico" do menu launcher (as Configurações do app). Fire-and-forget:
- * NÃO usa o slot único do SAF (nada volta pelo nativeOnFilePicked); só posta
- * o Intent no Java e devolve. Roda na thread de render (callback do
- * GameOption, segurando ui_state_mutex): mesma disciplina JNI de
- * call_java_request — anexa a thread na 1ª chamada e usa o cache de
- * classe/método populado no nativeBridgeInit (FindClass em thread nativa
- * falharia; ver ensure_jni_cache).
- */
-bool open_diagnostics_screen() {
-    JavaVM *vm = g_vm;
-    if (vm == nullptr) {
-        ALOGE("diagnostics: JavaVM ausente (nativeBridgeInit não rodou?)");
-        return false;
-    }
-
-    JNIEnv *env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_4) != JNI_OK) {
-        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
-            ALOGE("diagnostics: AttachCurrentThread falhou");
-            return false;
-        }
-    }
-
-    if (!ensure_jni_cache(env)) return false;
-
-    jclass cls = nullptr;
-    jmethodID mid = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        cls = g_main_class;
-        mid = g_mid_diag;
-    }
-
-    jboolean res = env->CallStaticBooleanMethod(cls, mid);
-    if (env->ExceptionCheck()) {
-        ALOGE("diagnostics: exceção Java em openDiagnosticsScreen");
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        return false;
-    }
-
-    if (!res) ALOGW("diagnostics: Java recusou abrir a tela (Activity indisponível?)");
-    return res == JNI_TRUE;
 }
 
 void process_pending() {

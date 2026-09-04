@@ -4,6 +4,11 @@
  * só inicializa o Vulkan uma vez por processo; trocar o driver sem
  * reiniciar deixa a VkInstance ativa em mismatch com o ICD que o
  * adrenotools acabou de injetar via hooks — SIGSEGV no thread de jogo).
+ * O MESMO mecanismo é usado após a seleção de uma ROM nova no launcher:
+ * o ciclo do seletor (SAF) destrói/recria a surface Vulkan e deixa o
+ * "Start Game" na mesma sessão em um estado frágil — reiniciar põe o
+ * início do jogo num processo limpo (ver ui_launcher.cpp do patch do
+ * RecompFrontend).
  */
 #include "app_restart.h"
 
@@ -55,8 +60,8 @@ bool dispatch_restart_to_java(JNIEnv *env) {
                                                      std::memory_order_acq_rel)) {
         return false;
     }
-    ALOGI("app_restart: reinício solicitado pelo nativo (driver mudou; "
-          "Vulkan foi inicializado com o driver anterior)");
+    ALOGI("app_restart: reinício solicitado pelo nativo (estado que exige "
+          "processo novo — troca de driver ou seleção de ROM)");
 
     jclass cls = nullptr;
     jmethodID mid = nullptr;

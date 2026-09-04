@@ -75,14 +75,6 @@ bool request(Kind kind, Callback callback);
 void process_pending();
 
 /*
- * Abre a tela Java de diagnóstico (DiagnosticsActivity — toggle da captura,
- * logs por sessão e compartilhamento) a partir do menu launcher. Fire-and-
- * forget: posta o Intent e devolve; false só quando a ponte JNI não está
- * pronta ou o Java recusou. NÃO toca no slot único do SAF.
- */
-bool open_diagnostics_screen();
-
-/*
  * Injetado pelo MainActivity.nativeBridgeInit (após loadLibraries) — guarda a
  * JavaVM para os pinos JNI das threads de render. Recebe void* para o header
  * não depender de jni.h.
@@ -103,7 +95,6 @@ inline bool request(Kind, Callback callback) {
     return false;
 }
 inline void process_pending() {}
-inline bool open_diagnostics_screen() { return false; }
 inline void set_java_vm(void *) {}
 } // namespace androidport::filedialog
 

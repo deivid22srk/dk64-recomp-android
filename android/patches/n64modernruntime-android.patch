@@ -1,0 +1,139 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index ea1c49b..262274c 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -183,15 +183,40 @@ static std::vector<uint8_t> read_file(const std::filesystem::path& path) {
+ }
+ 
+ bool write_file(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
++    /*
++     * Port fix: a versão anterior verificava apenas o estado do stream ANTES
++     * da escrita e devolvia true incondicionalmente — uma falha de I/O no
++     * meio da escrita (disco cheio, EIO, processamento morto pelo sistema)
++     * produzia um arquivo truncado/corrompido reportado como sucesso. No
++     * Android isso era fatal na prática: a ROM "armazenada" da 1ª execução
++     * passava no check da UI e quebrava mais tarde no início do jogo, sem
++     * nenhum diagnóstico. Agora: resultado da escrita + flush/close +
++     * verificação do tamanho persistido em disco.
++     */
+     std::ofstream out_file{ path, std::ios::binary };
+ 
+     if (!out_file.good()) {
+         return false;
+     }
+ 
+-    out_file.write(reinterpret_cast<const char*>(data.data()), data.size());
++    if (!data.empty()) {
++        out_file.write(reinterpret_cast<const char*>(data.data()), data.size());
++        if (!out_file.good()) {
++            return false;
++        }
++    }
+ 
+-    return true;
++    out_file.close();
++    if (!out_file.good()) {
++        return false;
++    }
++
++    // Verificação de persistência: um stat barato fecha a janela de
++    // truncamento silencioso (write "bem-sucedido" com dados perdidos no
++    // cache sem flush efetivo do sistema de arquivos).
++    std::error_code ec;
++    const auto written_size = std::filesystem::file_size(path, ec);
++    return !ec && written_size == data.size();
+ }
+ 
+ bool check_stored_rom(const recomp::GameEntry& game_entry) {
+@@ -391,6 +416,12 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+     }
+ 
+     if (!check_hash(rom_data, game_entry.rom_hash)) {
++        // Os reads abaixo cortam o nome interno no offset 0x20 — protege
++        // contra arquivos minúsculos (não-ROM) que passaram no check_rom_start
++        // mas não têm cabeçalho completo (leitura OOB de heap).
++        if (rom_data.size() < 0x40) {
++            return recomp::RomValidationError::NotARom;
++        }
+         const std::string_view name{ reinterpret_cast<const char*>(rom_data.data()) + 0x20, game_entry.internal_name.size()};
+         if (name == game_entry.internal_name) {
+             return recomp::RomValidationError::IncorrectVersion;
+@@ -405,7 +436,15 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+         }
+     }
+ 
+-    write_file(config_path / game_entry.stored_filename(), rom_data);
++    /*
++     * Port fix: o resultado da escrita era DESCARTADO — uma falha silenciosa
++     * de I/O aqui deixava a UI marcando a ROM como válida (botão vira "Start
++     * Game") sem nenhum arquivo válido no config. Agora a falha vira um erro
++     * visível na UI e o botão permanece "Load ROM".
++     */
++    if (!write_file(config_path / game_entry.stored_filename(), rom_data)) {
++        return recomp::RomValidationError::OtherError;
++    }
+     
+     return recomp::RomValidationError::Good;
+ }
+@@ -705,8 +744,22 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+         // TODO refactor this to allow a project to specify what entrypoint function to run for a give game.
+         case GameStatus::Running:
+             {
++                /*
++                 * Port fix (crash na 1ª inicialização): em caso de falha aqui
++                 * o fluxo anterior apenas mostrava a message box e CONTINUAVA
++                 * — init() rodava com o rom global VAZIO (set_rom_contents
++                 * nunca foi chamado) e o primeiro do_rom_read desreferenciava
++                 * rom.data() == nullptr => SIGSEGV imediato e silencioso do
++                 * processo ("o app fecha"). Espelha o caminho de recuperação
++                 * dos erros de mods: volta o status para None (a launcher
++                 * reaparece) e retorna false para a thread de jogo aguardar
++                 * uma nova tentativa.
++                 */
+                 if (!recomp::load_stored_rom(current_game.value())) {
+-                    ultramodern::error_handling::message_box("Error opening stored ROM! Please restart this program.");
++                    ultramodern::error_handling::message_box("Error opening the stored ROM! Please select the ROM again.");
++                    game_status.store(GameStatus::None);
++                    game_status.notify_all();
++                    return false;
+                 }
+ 
+                 auto find_it = game_roms.find(current_game.value());
+@@ -869,12 +922,31 @@ void recomp::start(const recomp::Configuration& cfg) {
+ 
+         ultramodern::set_native_thread_name("Game Start Thread");
+ 
+-        ultramodern::preinit(rdram, window_handle);
+-
+-        recomp_context context{};
+-
+-        // Loop until the game starts.
+-        while (!wait_for_game_started(rdram, &context)) {}
++        /*
++         * Port fix: a única exceção tratada dentro do fluxo de início era
++         * ultramodern::thread_terminated (capturada ao redor do entrypoint).
++         * Qualquer outra exceção (bad_alloc na descompressão da ROM,
++         * filesystem_error nos saves, erro em mods) escapava da thread =>
++         * std::terminate => processo encerrado sem NENHUMA mensagem ("o app
++         * fecha"). Agora o erro é reportado ao usuário e o encerramento
++         * segue o caminho limpo do runtime (ultramodern::quit -> loop
++         * principal sai -> SDL finaliza a Activity).
++         */
++        try {
++            ultramodern::preinit(rdram, window_handle);
++
++            recomp_context context{};
++
++            // Loop until the game starts.
++            while (!wait_for_game_started(rdram, &context)) {}
++        } catch (const std::exception& e) {
++            std::string error_message = std::string{"Unexpected error while starting the game: "} + e.what();
++            ultramodern::error_handling::message_box(error_message.c_str());
++            ultramodern::quit();
++        } catch (...) {
++            ultramodern::error_handling::message_box("Unexpected unknown error while starting the game.");
++            ultramodern::quit();
++        }
+     }, window_handle, rdram};
+ 
+     while (!exited) {

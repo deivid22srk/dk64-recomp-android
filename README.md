@@ -23,12 +23,15 @@ Cada push gera um APK automaticamente no GitHub Actions (workflow `build.yml`):
    desativada). Na primeira execução os assets da UI são extraídos sozinhos.
 3. Se ainda não houver ROM, a primeira opção do menu é **“Load ROM”**: toque,
    escolha o arquivo (`.z64`, `.n64` ou `.v64` — a conversão de byteswap é
-   automática) no seletor de arquivos do Android e aguarde a validação — a
-   opção vira **“Start Game”**.
+   automática) no seletor de arquivos do Android e aguarde a validação —
+   aparece um aviso e o **app reinicia sozinho** (~1,5 s) para finalizar a
+   instalação; na reabertura a opção já está como **“Start Game”**.
 
    > A ROM escolhida é copiada para o armazenamento interno do app e validada
    > por hash (pick-once: nas próximas aberturas o menu já abre em “Start
-   > Game”).
+   > Game”). O reinício põe o início do jogo num processo limpo — o mesmo
+   > princípio do menu “GPU Driver” (o Vulkan inicializa uma vez por
+   > processo).
 
 ### Requisitos
 
