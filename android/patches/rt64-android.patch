@@ -347,7 +347,7 @@ index 9fae0d4..c369ea3
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
 old mode 100644
 new mode 100755
-index 721a01e..172ba97
+index 721a01e..0e6b8c8
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
 @@ -13,9 +13,19 @@
@@ -726,7 +726,7 @@ index 721a01e..172ba97
          }
          else if (shaderFormat == RenderShaderFormat::METAL) {
  #       ifdef __APPLE__
-@@ -237,6 +539,175 @@ namespace RT64 {
+@@ -237,6 +539,182 @@ namespace RT64 {
  #endif
          creation.multisampling = multisampling;
          pipeline = createPipeline(creation);
@@ -755,10 +755,17 @@ index 721a01e..172ba97
 +            // by the backend guards, which is what blacked out whole categories of
 +            // geometry). Every rung keeps the same interface, spec constant set and
 +            // fixed function state:
-+            //   rung 2 (SAFE): no screen-space derivatives, no decal depth tolerance,
-+            //     no LOD derivation, no mip level derivation. Textures, combiners,
-+            //     blending and fog are fully preserved.
-+            //   rung 3 (SOLID): vertex color only, no textures and no buffers.
++            //   rung 2 (SAFE): no screen-space derivatives (the decal depth
++            //     tolerance degrades to a constant slope term), no LOD derivation,
++            //     no mip level derivation. Textures, combiners, blending, fog and
++            //     the coplanar decal rejection are fully preserved.
++            //   rung 3 (SOLID): vertex color only, no textures and no buffers,
++            //     except the background depth read that the coplanar decal
++            //     rejection needs: ZMODE_DEC pipelines are created with the
++            //     hardware depth test disabled (zCmp above), so that check is the
++            //     ONLY occlusion a decal draw ever gets and must survive into
++            //     every permutation. Dropping it made the ground path paint over
++            //     the trees (log3 evidence).
 +            // Note the blend state: on drivers where dual source blending is
 +            // unreliable the pipelines already use SRC_ALPHA blending, which is what
 +            // the single-output fallback permutations expect. A reliable dual source
@@ -902,7 +909,7 @@ index 721a01e..172ba97
      }
  
      RasterShader::~RasterShader() { }
-@@ -330,11 +801,22 @@ namespace RT64 {
+@@ -330,11 +808,22 @@ namespace RT64 {
          pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
  
          // Alpha blending is performed by using dual source blending. The blending factor will be in the secondary output.
@@ -927,7 +934,7 @@ index 721a01e..172ba97
              targetBlend.blendOp = RenderBlendOperation::ADD;
          }
  
-@@ -441,8 +923,38 @@ namespace RT64 {
+@@ -441,8 +930,38 @@ namespace RT64 {
              return;
          }
  
@@ -967,7 +974,7 @@ index 721a01e..172ba97
  
          FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
          FramebufferRendererDescriptorTextureSet descriptorTextureSet;
-@@ -460,7 +972,7 @@ namespace RT64 {
+@@ -460,7 +979,7 @@ namespace RT64 {
          // Generate all possible combinations of pipeline creations and assign them to each thread. Skip the ones that are invalid.
          uint32_t pipelineCount = uint32_t(std::size(pipelines));
          pipelineThreadCreations.clear();
@@ -976,7 +983,7 @@ index 721a01e..172ba97
  
          PipelineCreation creation;
          creation.device = device;
-@@ -474,16 +986,20 @@ namespace RT64 {
+@@ -474,16 +993,20 @@ namespace RT64 {
          creation.multisampling = multisampling;
  
          uint32_t threadIndex = 0;
@@ -999,7 +1006,7 @@ index 721a01e..172ba97
          pipelineThreads.clear();
          pipelineThreads.resize(pipelineThreadCreations.size());
          for (uint32_t i = 0; i < uint32_t(pipelineThreads.size()); i++) {
-@@ -503,9 +1019,9 @@ namespace RT64 {
+@@ -503,9 +1026,9 @@ namespace RT64 {
              break;
  #   endif
          case RenderShaderFormat::SPIRV:
@@ -1012,7 +1019,7 @@ index 721a01e..172ba97
              break;
  #   ifdef __APPLE__
          case RenderShaderFormat::METAL:
-@@ -552,6 +1068,10 @@ namespace RT64 {
+@@ -552,6 +1075,10 @@ namespace RT64 {
  
          postBlendDesc.pixelShader = postBlendSubNegativePixelShader.get();
          postBlendDitherNoiseSubNegativePipeline = device->createGraphicsPipeline(postBlendDesc);
@@ -1023,7 +1030,7 @@ index 721a01e..172ba97
      }
  
      RasterShaderUber::~RasterShaderUber() {
-@@ -559,27 +1079,34 @@ namespace RT64 {
+@@ -559,27 +1086,34 @@ namespace RT64 {
      }
  
      void RasterShaderUber::threadCreatePipelines(uint32_t threadIndex) {
@@ -1297,7 +1304,7 @@ index 0000000..5575dfb
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
 old mode 100644
 new mode 100755
-index e7895c3..4349769
+index e7895c3..09914d0
 --- a/src/shaders/RasterPS.hlsl
 +++ b/src/shaders/RasterPS.hlsl
 @@ -45,6 +45,41 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
@@ -1342,33 +1349,44 @@ index e7895c3..4349769
  LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float2 vertexUV, float4 vertexSmoothColor, float4 vertexFlatColor,
      bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
  {
-@@ -88,6 +123,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+@@ -88,6 +123,15 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
          }
      }
  
-+#ifndef RASTER_PS_SAFE
-+    // Port DK64-Recomp Android: skipped entirely in the SAFE permutation. The check
-+    // reads the background depth buffer and uses screen-space derivatives, neither
-+    // of which exists in the fallback. Decals lose their depth tolerance, which can
-+    // introduce minor z-fighting on decal geometry (shadows, grass overlays), but
-+    // the depth test of the pipeline still rejects fully occluded decals.
++    // Port DK64-Recomp Android: this check is the ONLY occlusion a decal ever gets.
++    // Pipelines for ZMODE_DEC draws are created with the hardware depth test
++    // disabled on purpose (zCmp is false whenever zMode is ZMODE_DEC - see the
++    // pipeline creation in RasterShader), so an earlier version of the SAFE
++    // permutation that skipped this check made decal geometry (ground paths,
++    // shadows, grass overlays) paint over everything that was drawn before it,
++    // most visibly the yellow dirt path rendering on top of trees. The check only
++    // needs a depth-buffer texel load, which is derivative free, so it is kept in
++    // every permutation; only the slope-scaled tolerance term differs in SAFE.
      if (depthDecal) {
          // Sample the depth buffer for this pixel to compare for the decal check.
          int2 pixelPos = floor(vertexPosition.xy);
-@@ -100,7 +141,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+@@ -100,7 +144,17 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
              dz = instanceRDPParams[instanceIndex].primDepth.y;
          }
          else {
 -            dz = (abs(ddx(vertexPosition.z)) + abs(ddy(vertexPosition.z))) * FbParams.resolutionScale.y;
++#ifdef RASTER_PS_SAFE
++            // Port DK64-Recomp Android: no derivatives in the SAFE permutation, so
++            // the per-pixel slope term degrades to a constant. 1/1024 is about
++            // twice the largest coplanar tolerance (5e-4 near the camera): large
++            // enough to absorb the interpolation differences of gently sloped
++            // terrain under decals, small enough that unrelated geometry in front
++            // of the decal is still rejected.
++            dz = 1.0f / 1024.0f;
++#else
 +            dz = (abs(rtDdx(vertexPosition.z)) + abs(rtDdy(vertexPosition.z))) * FbParams.resolutionScale.y;
++#endif
          }
  
          // Perform the decal depth tolerance check.
-@@ -110,25 +151,38 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
-             return false;
+@@ -111,24 +165,36 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
          }
      }
-+#endif
      
 -    float2 ddxVertexUV = ddx(vertexUV);
 -    float2 ddyVertexUV = ddy(vertexUV);
@@ -1405,7 +1423,7 @@ index e7895c3..4349769
  
      float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
      float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
-@@ -290,8 +344,17 @@ void PSMain(
+@@ -290,8 +356,17 @@ void PSMain(
  #if defined(DYNAMIC_RENDER_PARAMS)
      , bool isFrontFace : SV_IsFrontFace
  #endif
@@ -1423,7 +1441,7 @@ index e7895c3..4349769
  )
  {
  #if !defined(DYNAMIC_RENDER_PARAMS)
-@@ -307,7 +370,18 @@ void PSMain(
+@@ -307,7 +382,18 @@ void PSMain(
          discard;
      }
  
@@ -1445,10 +1463,10 @@ index e7895c3..4349769
 \ No newline at end of file
 diff --git a/src/shaders/RasterPSSolidPS.hlsl b/src/shaders/RasterPSSolidPS.hlsl
 new file mode 100644
-index 0000000..f21d37b
+index 0000000..8b5da3d
 --- /dev/null
 +++ b/src/shaders/RasterPSSolidPS.hlsl
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,110 @@
 +//
 +// RT64 (port DK64-Recomp Android)
 +//
@@ -1468,6 +1486,16 @@ index 0000000..f21d37b
 +// SRC_ALPHA blend state that the pipelines use when dual source blending is
 +// considered unreliable.
 +//
++// One piece of RasterPS.hlsl is deliberately kept even in this last resort: the
++// coplanar decal rejection. ZMODE_DEC pipelines are created WITHOUT a hardware
++// depth test (zCmp is false whenever zMode is ZMODE_DEC in RasterShader), so a
++// decal draw that ran through a permutation without the rejection check would
++// paint over everything drawn before it (observed as the ground path rendering
++// on top of trees when the SAFE rung lacked the check). The rejection only needs
++// a background depth texel load, which is derivative free and far simpler than
++// the texture sampling the dither shaders that already link on this driver
++// family perform.
++//
 +// The input interface mirrors RasterPS.hlsl's PSMain (COLOR1 exists only when the
 +// VERTEX_FLAT_COLOR permutation is built), so it can be swapped in for any
 +// specialized shader without touching the vertex shader or the pipeline layout.
@@ -1481,7 +1509,40 @@ index 0000000..f21d37b
 +
 +#include "shared/rt64_render_params.h"
 +#include "shared/rt64_render_flags.h"
++#include "shared/rt64_other_mode.h"
++#include "Depth.hlsli"
 +#include "RenderParamsSpecConstants.hlsli"
++
++#if defined(MULTISAMPLING)
++Texture2DMS<float> gBackgroundDepth : register(t2, space3);
++
++float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
++    float v = gBackgroundDepth.Load(pixelPos, 0);
++    if (sampleCount >= 2) {
++        v += gBackgroundDepth.Load(pixelPos, 1);
++    }
++
++    if (sampleCount >= 4) {
++        v += gBackgroundDepth.Load(pixelPos, 2);
++        v += gBackgroundDepth.Load(pixelPos, 3);
++    }
++
++    if (sampleCount >= 8) {
++        v += gBackgroundDepth.Load(pixelPos, 4);
++        v += gBackgroundDepth.Load(pixelPos, 5);
++        v += gBackgroundDepth.Load(pixelPos, 6);
++        v += gBackgroundDepth.Load(pixelPos, 7);
++    }
++
++    return v / float(sampleCount);
++}
++#else
++Texture2D<float> gBackgroundDepth : register(t2, space3);
++
++float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
++    return gBackgroundDepth.Load(int3(pixelPos, 0));
++}
++#endif
 +
 +void PSMain(
 +      in float4 vertexPosition : SV_POSITION
@@ -1497,6 +1558,23 @@ index 0000000..f21d37b
 +#endif
 +    const uint rpFlags = rpFlagsValue;
 +    const float4 vertexColor = renderFlagSmoothShade(rpFlags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
++
++    // Port DK64-Recomp Android: coplanar decal rejection, kept derivative free.
++    // The constant slope tolerance matches the SAFE permutation of RasterPS.hlsl;
++    // the prim depth refinement is unavailable here because this permutation does
++    // not read instance buffers.
++    const OtherMode otherMode = { rpOtherModeL, rpOtherModeH };
++    if (otherMode.zMode() == ZMODE_DEC) {
++        int2 pixelPos = floor(vertexPosition.xy);
++        uint sampleCount = 1U << renderFlagSampleCount(rpFlags);
++        float surfaceDepth = sampleBackgroundDepth(pixelPos, sampleCount);
++        const float DepthTolerance = max(CoplanarDepthTolerance(surfaceDepth), 1.0f / 1024.0f);
++        const float pixelDepth = renderFlagNoN(rpFlags) ? max(vertexPosition.z, 0.0f) : vertexPosition.z;
++        if (abs(pixelDepth - surfaceDepth) > DepthTolerance) {
++            discard;
++        }
++    }
++
 +    pixelColor = float4(vertexColor.rgb, vertexColor.a);
 +}
 diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
