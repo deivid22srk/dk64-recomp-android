@@ -17,6 +17,32 @@
 #define ANDROID_CUSTOM_DRIVER_H
 
 #ifdef __cplusplus
+#include <string>
+
+/*
+ * Utilidades usadas pelo menu "GPU Driver" do launcher (main.cpp) — C++ puro
+ * (mesmo binário, sem passar por JNI).
+ */
+namespace dk64driver {
+
+/*
+ * Texto de status atual do driver Vulkan (para a caixa de diálogo do menu):
+ *  - driver custom ativo: nome + GPU/report do probe;
+ *  - sem driver custom: mensagem explicando como instalar um Turnip (.zip).
+ * Todas as strings em inglês (idioma da UI do jogo).
+ */
+std::string status_text();
+
+/*
+ * Remove a seleção atual (files/driver/selected.txt) e invalida o estado em
+ * cache para que o próximo ensure recarregue (caindo no driver do sistema).
+ */
+void reset_selection();
+
+} // namespace dk64driver
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 

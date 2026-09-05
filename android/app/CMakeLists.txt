@@ -276,9 +276,16 @@ endforeach()
 if(TARGET plume)
     target_include_directories(plume PRIVATE ${SDL2_ALL_INCLUDES})
 endif()
-# Patch do RecompFrontend (file.cpp) usa android_paths.h
+# Patch do RecompFrontend (file.cpp, ui_mod_menu.cpp) usa android_paths.h e
+# file_bridge.h (seletor SAF de ROM/driver/mods + pasta mods no gerenciador).
 if(TARGET recompui)
     target_include_directories(recompui PRIVATE "${ANDROID_PORT_DIR}/native/compat")
+endif()
+# Patch do rt64 (rt64_present_queue.cpp) usa app_lifecycle.h — congelamento da
+# present queue enquanto o app está em segundo plano (DocumentsUI/Home), que
+# evita o SIGSEGV do driver Adreno ao apresentar em surface destruída.
+if(TARGET rt64)
+    target_include_directories(rt64 PRIVATE "${ANDROID_PORT_DIR}/native/compat")
 endif()
 
 # ----------------------------------------------------------------------------
@@ -356,6 +363,21 @@ set(MAIN_SOURCES
 
     "${ANDROID_PORT_DIR}/native/compat/android_paths.cpp"
     "${ANDROID_PORT_DIR}/native/compat/custom_driver.cpp"
+    # Ponte SAF <-> menus do recomp (ROM/driver escolhidos na UI do próprio jogo)
+    "${ANDROID_PORT_DIR}/native/compat/file_bridge.cpp"
+    # Congelamento da render em segundo plano (onPause/surfaceDestroyed — o
+    # gate vive na PresentQueue do rt64 via app_lifecycle.h)
+    "${ANDROID_PORT_DIR}/native/compat/app_lifecycle.cpp"
+    # Reinício limpo do app após troca de driver Vulkan (o plume/RT64 só
+    # inicializa o Vulkan uma vez por processo, então trocar o driver sem
+    # reiniciar deixa a VkInstance ativa em mismatch com o novo ICD que o
+    # adrenotools acabou de injetar — SIGSEGV ao iniciar o jogo).
+    "${ANDROID_PORT_DIR}/native/compat/app_restart.cpp"
+    # Visibilidade de morte nativa (SIGSEGV/SIGABRT/terminate -> logcat na tag
+    # DK64Recomp-Crash antes do tombstone padrão do Android).
+    "${ANDROID_PORT_DIR}/native/compat/crash_handler.cpp"
+    # Gamepad virtual de toque (overlay Java + ponte JNI + merge no input N64)
+    "${ANDROID_PORT_DIR}/native/compat/virtual_pad.cpp"
 )
 target_sources(main PRIVATE ${MAIN_SOURCES} "${ICON_GEN_DIR}/icon_bytes.c")
 

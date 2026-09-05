@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Progresso do Port Android</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --gray: #484f58;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .subtitle { color: var(--text-dim); font-size: 0.9rem; }
+  .repo-link { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .repo-link:hover { text-decoration: underline; }
+
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+  .status-badge.investigando { background: #d2992233; color: var(--yellow); }
+  .status-badge.portando { background: #58a6ff33; color: var(--accent); }
+  .status-badge.build_ci { background: #58a6ff33; color: var(--accent); }
+  .status-badge.testando { background: #d2992233; color: var(--yellow); }
+  .status-badge.concluido { background: #3fb95033; color: var(--green); }
+  .status-badge.erro { background: #f8514933; color: var(--red); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .progress-bar-outer {
+    height: 6px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+    margin: 20px 0 32px;
+  }
+  .progress-bar-inner {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    border-radius: 999px;
+    transition: width 0.3s ease;
+  }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+  }
+  .panel h2 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+  }
+
+  .step {
+    display: flex;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .step:last-child { border-bottom: none; }
+  .step-icon {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .step-icon.pending { border: 2px solid var(--gray); color: var(--gray); }
+  .step-icon.in_progress { background: var(--accent); color: #0d1117; }
+  .step-icon.done { background: var(--green); color: #0d1117; }
+  .step-icon.error { background: var(--red); color: #0d1117; }
+  .step-body { flex: 1; }
+  .step-name { font-weight: 600; font-size: 0.95rem; }
+  .step-name.pending { color: var(--text-dim); }
+  .step-notes { color: var(--text-dim); font-size: 0.85rem; margin-top: 3px; }
+  .step-time { color: var(--gray); font-size: 0.75rem; margin-top: 3px; }
+
+  .log-entry {
+    display: flex;
+    gap: 10px;
+    padding: 7px 0;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border);
+    font-family: "SF Mono", Consolas, monospace;
+  }
+  .log-entry:last-child { border-bottom: none; }
+  .log-time { color: var(--gray); flex-shrink: 0; }
+  .log-msg.info { color: var(--text); }
+  .log-msg.warn { color: var(--yellow); }
+  .log-msg.error { color: var(--red); }
+  .log-msg.success { color: var(--green); }
+
+  .empty { color: var(--text-dim); font-size: 0.85rem; font-style: italic; }
+  footer { text-align: center; color: var(--gray); font-size: 0.75rem; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="project-title">Port Android — carregando…</h1>
+    <div class="subtitle"><a class="repo-link" id="repo-link" href="#" target="_blank"></a></div>
+    <span class="status-badge" id="status-badge"><span class="dot"></span><span id="status-text"></span></span>
+  </header>
+
+  <div class="progress-bar-outer">
+    <div class="progress-bar-inner" id="progress-bar" style="width:0%"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Etapas</h2>
+    <div id="steps-list"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Log de eventos</h2>
+    <div id="log-list"></div>
+  </div>
+
+  <footer id="last-update"></footer>
+</div>
+
+<!--
+  Bloco de fallback: fica vazio no template. O script sync_progress.py
+  injeta aqui uma cópia do conteúdo de PROGRESS.json toda vez que roda,
+  para que o dashboard também funcione se for aberto direto (file://),
+  sem servidor, sem fetch.
+-->
+<script id="progress-data-fallback" type="application/json">
+{
+  "project_name": "DK64 Recompiled — fix seleção de driver Vulkan",
+  "repo_url": "https://github.com/deivid22srk/dk64-recomp-android",
+  "status": "build_ci",
+  "last_update": "2026-09-02T00:57:27Z",
+  "steps": [
+    {
+      "id": "investigacao",
+      "name": "Investigação do bug (log + screenshot + código)",
+      "status": "done",
+      "notes": "Log 01_09-19-34-08_380.log: Turnip carregado e probe OK, mas o Vulkan (volkInitialize) já inicializou com o driver do sistema. Start Game → SIGSEGV no thread [Game] MAIN (vkCreateGraphicsPipelines falhando, vkAllocateDescriptorSets falhando).",
+      "time": "2026-09-01T23:16:04Z"
+    },
+    {
+      "id": "diagnostico",
+      "name": "Diagnóstico: a troca de driver exige reinício do app",
+      "status": "done",
+      "notes": "plume/RT64 chama volkInitializeCustom() UMA VEZ no construtor de VulkanInterface. Trocar driver no mesmo processo deixa a VkInstance ativa em mismatch com o ICD que o adrenotools injetou via hooks.",
+      "time": "2026-09-01T23:16:04Z"
+    },
+    {
+      "id": "app_restart_h",
+      "name": "Header app_restart.h com namespace dk64 + stub desktop",
+      "status": "done",
+      "notes": "Cria android/native/compat/app_restart.h com dk64::native_request_app_restart() (real no Android, no-op fora).",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "app_restart_cpp",
+      "name": "app_restart.cpp com dispatch JNI idempotente",
+      "status": "done",
+      "notes": "Resolve MainActivity via JNI FindClass, chama handleNativeAppRestart()V. atomic<bool> g_restart_requested para idempotência. JavaVM cacheada via JNI_OnLoad-like export (nativeRestartInit) — corrige link error JNI_GetCreatedJavaVMs.",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "java_handler",
+      "name": "MainActivity.handleNativeAppRestart finaliza Activity",
+      "status": "done",
+      "notes": "Método estático que pega mSingleton, chama runOnUiThread+finish() se não está terminando. onDestroy já existente mata o processo (Process.killProcess).",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "menu_message",
+      "name": "Mensagens do menu GPU Driver atualizadas",
+      "status": "done",
+      "notes": "Texto 'It will be used the next time' substituído por 'The app will now restart to load the new driver' em main.cpp e GpuDriverInstaller.java. status_text() também atualizado.",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "menu_restart",
+      "name": "Menu GPU Driver dispara request_app_restart_after_delay",
+      "status": "done",
+      "notes": "Após install/remove do driver, mostra SDL_ShowSimpleMessageBox e dispara std::thread com 800ms de delay chamando dk64::native_request_app_restart().",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "cmake",
+      "name": "app_restart.cpp adicionado ao CMakeLists",
+      "status": "done",
+      "notes": "Adicionado em android/app/CMakeLists.txt junto com android_paths.cpp, custom_driver.cpp, file_bridge.cpp, app_lifecycle.cpp, virtual_pad.cpp.",
+      "time": "2026-09-01T23:32:52Z"
+    },
+    {
+      "id": "gitlink_fix",
+      "name": "Corrigir gitlinks de submodules acidentalmente alterados",
+      "status": "done",
+      "notes": "git add -A incluiu N64ModernRuntime e RecompFrontend em commits errados (heads/main sem librecomp/config.hpp). Revertido para os commits originais (45bd018 e 6d187f7).",
+      "time": "2026-09-02T00:57:27Z"
+    },
+    {
+      "id": "compilacao",
+      "name": "Build via GitHub Actions build.yml",
+      "status": "done",
+      "notes": "Run 33576162788: SUCCESS em 10m49s. Build do APK passou com app_restart.cpp incluído. Anotações apenas de deprecation (Node 20/setup-java v4) — não bloqueiam.",
+      "time": "2026-09-02T00:57:27Z"
+    },
+    {
+      "id": "teste_real",
+      "name": "Teste real no dispositivo (moto g34 5G)",
+      "status": "pending",
+      "notes": "Instalar APK, repetir fluxo: GPU Driver → Install → WN-Turnip → reinício automático → Start Game sem SIGSEGV.",
+      "time": ""
+    }
+  ],
+  "log": [
+    {
+      "time": "2026-09-01T23:16:04Z",
+      "level": "info",
+      "message": "Repositório clonado na branch fix/swapchain-destroyed-after-saf-foreground-flutter"
+    },
+    {
+      "time": "2026-09-01T23:16:04Z",
+      "level": "info",
+      "message": "Log 01_09-19-34-08_380.log analisado — Turnip instalado, probe OK, SIGSEGV no [Game] MAIN"
+    },
+    {
+      "time": "2026-09-01T23:16:04Z",
+      "level": "success",
+      "message": "Causa raiz: volkInitialize roda antes do SAF; troca de driver sem reinício é impossível"
+    },
+    {
+      "time": "2026-09-01T23:32:52Z",
+      "level": "info",
+      "message": "Plano: forçar reinício do app após install/remove do driver via JNI→MainActivity.finish→killProcess"
+    },
+    {
+      "time": "2026-09-01T23:32:52Z",
+      "level": "success",
+      "message": "app_restart.h/cpp criados; main.cpp e MainActivity.java atualizados; CMakeLists inclui o novo .cpp"
+    },
+    {
+      "time": "2026-09-01T23:49:23Z",
+      "level": "error",
+      "message": "Build falhou: JNI_GetCreatedJavaVMs não linkado (NDK não exporta o símbolo) — corrigido cacheando JavaVM via nativeRestartInit"
+    },
+    {
+      "time": "2026-09-01T23:54:50Z",
+      "level": "error",
+      "message": "Build falhou: librecomp/config.hpp não encontrado — git add -A alterou gitlinks de N64ModernRuntime/RecompFrontend para heads/main"
+    },
+    {
+      "time": "2026-09-02T00:57:27Z",
+      "level": "success",
+      "message": "Gitlinks corrigidos para commits originais; Build run 33576162788 PASSED (10m49s) com app_restart.cpp"
+    },
+    {
+      "time": "2026-09-02T00:57:27Z",
+      "level": "info",
+      "message": "Próximo passo: teste real no moto g34 5G — instalar APK e validar fluxo de troca de driver com reinício automático"
+    }
+  ]
+}
+</script>
+
+<script>
+async function loadData() {
+  // Fonte primária: PROGRESS.json ao lado do HTML (funciona via GitHub,
+  // GitHub Pages, ou qualquer servidor http local).
+  try {
+    const res = await fetch('PROGRESS.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('PROGRESS.json indisponível');
+    return await res.json();
+  } catch (e) {
+    // Fallback: bloco embutido, atualizado pelo sync_progress.py.
+    const fallback = document.getElementById('progress-data-fallback').textContent.trim();
+    return fallback && fallback !== '{}' ? JSON.parse(fallback) : null;
+  }
+}
+
+loadData().then(data => {
+  if (!data) {
+    document.getElementById('project-title').textContent = 'Nenhum dado de progresso encontrado ainda';
+    return;
+  }
+  render(data);
+});
+
+function render(data) {
+  document.getElementById('project-title').textContent = 'Port Android — ' + data.project_name;
+  const repoLink = document.getElementById('repo-link');
+  repoLink.href = data.repo_url;
+  repoLink.textContent = data.repo_url;
+
+  const statusLabels = {
+    investigando: 'Investigando',
+    portando: 'Portando',
+    build_ci: 'Build no CI/CD',
+    testando: 'Testando',
+    concluido: 'Concluído',
+    erro: 'Erro — aguardando correção'
+  };
+  const badge = document.getElementById('status-badge');
+  badge.classList.add(data.status);
+  document.getElementById('status-text').textContent = statusLabels[data.status] || data.status;
+  if (data.status !== 'concluido' && data.status !== 'erro') {
+    badge.querySelector('.dot').classList.add('pulse');
+  }
+
+  const total = data.steps.length;
+  const done = data.steps.filter(s => s.status === 'done').length;
+  document.getElementById('progress-bar').style.width = (total ? (done / total * 100) : 0) + '%';
+
+  const stepIcons = { pending: '', in_progress: '●', done: '✓', error: '!' };
+  const stepsList = document.getElementById('steps-list');
+  data.steps.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'step';
+    el.innerHTML = `
+      <div class="step-icon ${s.status}">${stepIcons[s.status] || ''}</div>
+      <div class="step-body">
+        <div class="step-name ${s.status}">${s.name}</div>
+        ${s.notes ? `<div class="step-notes">${s.notes}</div>` : ''}
+        ${s.time ? `<div class="step-time">${s.time}</div>` : ''}
+      </div>`;
+    stepsList.appendChild(el);
+  });
+
+  const logList = document.getElementById('log-list');
+  if (data.log.length === 0) {
+    logList.innerHTML = '<div class="empty">Nenhum evento registrado ainda.</div>';
+  } else {
+    [...data.log].reverse().forEach(entry => {
+      const el = document.createElement('div');
+      el.className = 'log-entry';
+      el.innerHTML = `<span class="log-time">${entry.time}</span><span class="log-msg ${entry.level}">${entry.message}</span>`;
+      logList.appendChild(el);
+    });
+  }
+
+  document.getElementById('last-update').textContent = data.last_update ? 'Última atualização: ' + data.last_update : '';
+}
+</script>
+</body>
+</html>

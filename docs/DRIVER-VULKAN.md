@@ -258,6 +258,63 @@ F DEBUG   : #00 pc 000000000002b2e4 /memfd:/system/lib64/libvulkan.so (deleted)
    e o crash desaparece; a função `dk64_adrenotools_custom_driver_active`
    deixou de ser referenciada no plume (segue exportada pela ponte nativa).
 
+## 2.5 Bug real em campo (5º round): o driver "some" ao fechar e reabrir o app
+
+Relato do teste em campo do reinício automático: instalar o Turnip funciona
+(instalação + probe OK), mas **fechar e reabrir o app** deixava o jogo no
+driver do sistema — o driver "perdia" ou "não carregava". Três causas-raiz
+compostas, todas no ciclo de vida do processo:
+
+1. **O reinício automático NUNCA disparou (caminho morto, dois bugs em série).**
+   `request_app_restart_after_delay` (main.cpp) dispara
+   `dk64::native_request_app_restart()` numa `std::thread` destacada — uma
+   thread NATIVA **não anexada à JVM**. Para ela, `JavaVM::GetEnv` devolve
+   `JNI_EDETACHED` e o `app_restart.cpp` abandonava o pedido com apenas um
+   ALOGW: o app prometia "The app will now restart" e continuava rodando com o
+   Vulkan já inicializado pelo driver anterior. E, mesmo anexando a thread
+   (1ª correção), o despacho usava `FindClass("...MainActivity")` nessa
+   thread sem frames Java — que resolve pelo classloader do SISTEMA e NÃO
+   encontra classes do app (o mesmo achado do commit `cc41f96` no
+   file_bridge). Correção: `AttachCurrentThread`/`DetachCurrentThread` em
+   `native_request_app_restart` (mesmo padrão do `call_java_request`) e o
+   `nativeRestartInit` (chamado no `onCreate`, com frame Java do app) agora
+   cacheia a referência GLOBAL de `MainActivity` + `handleNativeAppRestart()V`
+   para o despacho usar em qualquer thread (`dk64::cache_restart_entrypoints`).
+
+2. **Reabrir podia cair num 2º `SDL_main` no processo SUJO.** O
+   `MainActivity.onDestroy` só matava o processo com `isFinishing()`;
+   destruições iniciadas pelo sistema (swipe em Recents — comportamento
+   variável por OEM/versão, "Don't keep activities", destruição por
+   memória) chegam com `isFinishing()==false` e o processo sobrevivia com a
+   SDL morta e TODOS os estáticos nativos sujos (`g_state` do driver, tabela
+   do volk já ligada ao driver anterior, contexto RT64/RmlUi). Reabrir
+   rodava um 2º `SDL_main` nesse processo: o cache por fingerprint do
+   `ensure_loaded_locked` curto-circuitava e o Vulkan já estava inicializado
+   com o driver antigo. Correção: `Process.killProcess` INCONDICIONAL no
+   `onDestroy`, ANTES do `super` (o join do SDLThread em `super.onDestroy`
+   poderia travar a UI thread antes do kill chegar, mantendo o zumbi).
+   `configChanges` cobre recriações de configuração, então todo
+   `onDestroy` é fim de verdade.
+
+3. **O cold start dependia do fallback de `/proc/self/maps` para achar o
+   hookLibDir.** `androidport::native_library_dir()` só era preenchido pela
+   via do probe JNI; num início normal estava vazio e o
+   `ensure_loaded_locked` caía no scan de maps (fragilidade: qualquer
+   anomalia de mapeamento deixava o load quebrado na reabertura, enquanto o
+   probe da instalação — que recebe o path do Java — funcionava: o
+   padrão "funciona ao instalar, perde ao reabrir"). Correção: novo export
+   JNI `nativeSetRuntimePaths` (custom_driver.cpp) injeta o
+   `ApplicationInfo.nativeLibraryDir` no `onCreate` via
+   `androidport::set_native_library_dir` — global que NENHUM outro caminho
+   escreve no startup (sem corrida com a SDLThread que roda `init_from_args`
+   em paralelo); o scan de maps segue apenas como rede de segurança.
+
+Bônus de UX: `handleNativeAppRestart` agenda um alarme de +1.5s
+(`AlarmManager` + `PendingIntent` da launcher) ANTES de finalizar — o alarme
+é do sistema e sobrevive ao `killProcess`, reabrindo o app sozinho em cold
+start com o driver novo (best-effort: se o OEM bloquear, o app fecha e o
+usuário reabre manualmente, que agora também carrega o driver corretamente).
+
 ## 3. Arquitetura da integração
 
 ```text

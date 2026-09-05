@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <cinttypes>
 #include <chrono>
+#include <thread>
 
 #include "nfd.h"
 
@@ -17,6 +18,11 @@
 #include <stdlib.h>
 #include "SDL_main.h"
 #include "android_paths.h"
+#include "custom_driver.h"
+#include "file_bridge.h"
+#include "virtual_pad.h"
+#include "app_restart.h"
+#include "crash_handler.h"
 #else
 #define SDL_MAIN_HANDLED
 #endif
@@ -658,6 +664,115 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
     recompui::renderer::trigger_texture_pack_update();
 }
 
+#ifdef __ANDROID__
+/*
+ * Menu "GPU Driver" do launcher (Android) — substitui a tela Java de setup
+ * removida: o usuário instala/remove o driver Turnip direto pela UI do jogo.
+ *
+ * Fluxo (tudo na thread de render, dentro do callback do GameOption):
+ *   1. SDL_ShowMessageBox modal com o status atual e os botões
+ *      [Install .zip...] [Use system driver] [Cancel] — diálogo da PRÓPRIA
+ *      Activity (AlertDialog do SDL), sem troca de Activity: seguro segurar
+ *      o contexto do menu aqui.
+ *   2. "Install" abre o DocumentsUI via file_bridge (não-bloqueante — a
+ *      Activity vai a pausa atrás do DocumentsUI e o resultado chega pelo
+ *      draw_hook quando o app volta; ver file_bridge.h).
+ *   3. O resultado (instalação + probe Vulkan, feito pelo Java em background)
+ *      volta como payload e é mostrado numa caixa informativa.
+ *   4. Após install/remove, o app É REINICIADO (ver nota abaixo) — clicar
+ *      "Start Game" sem reiniciar é o bug original.
+ *
+ * POR QUE O APP PRECISA REINICIAR APÓS TROCAR O DRIVER:
+ *   o plume/RT64 inicializa o Vulkan UMA VEZ por processo, no construtor de
+ *   plume::VulkanInterface (chamado em rt64_application.cpp::createDeviceInterface
+ *   na primeira criação de swapchain). Lá, volkInitializeCustom é invocado com
+ *   o vkGetInstanceProcAddr do driver resolvido no INÍCIO do processo (via
+ *   dk64_adrenotools_get_instance_proc_addr, definida em custom_driver.cpp).
+ *   Se o usuário instala/remove o driver pelo menu, a VkInstance ativa já
+ *   existe, vinculada ao driver ANTERIOR. Recarregar o adrenotools nessa
+ *   hora injeta os hooks (libmain_hook.so) que redirecionam dlopen("vulkan.adreno.so")
+ *   para o novo driver, mas a VkInstance/device/swapchain ativos continuam
+ *   amarrados ao driver anterior — qualquer operação subsequente (recriar
+ *   device, recriar swapchain) é um SIGSEGV (visto no log
+ *   01_09-19-34-08_380.log: vkCreateGraphicsPipelines falhando, depois
+ *   vkAllocateDescriptorSets falhando, depois crash no thread [Game] MAIN).
+ *   A única solução robusta é reiniciar o processo: o MainActivity.onDestroy
+ *   já mata o processo (Process.killProcess) para zerar estáticos, e o
+ *   launcher do Android reabre o app em cold start, com o driver novo lido
+ *   de files/driver/selected.txt.
+ */
+namespace {
+void request_app_restart_after_delay(int delay_ms) {
+    /*
+     * Dispara o pedido de reinício num pequeno delay para que o SDL tenha
+     * tempo de processar o retorno da SDL_ShowSimpleMessageBox (que mostrou
+     * o resultado) e voltar ao loop de eventos antes de finalizar a Activity.
+     * Sem o delay, finish() roda dentro do callback da MessageBox, o que
+     * pode travar a UI thread em alguns Androids.
+     */
+    std::thread([delay_ms]() {
+        if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        dk64::native_request_app_restart();
+    }).detach();
+}
+} // namespace
+
+void show_android_gpu_driver_menu() {
+    const std::string status = dk64driver::status_text();
+
+    SDL_MessageBoxButtonData buttons[3]{};
+    int num_buttons = 0;
+    const int ID_INSTALL = 1;
+    const int ID_RESET = 2;
+    const int ID_CANCEL = 0;
+
+    buttons[num_buttons++] = { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, ID_INSTALL, "Install driver (.zip)..." };
+    if (dk64_adrenotools_custom_driver_active()) {
+        buttons[num_buttons++] = { 0, ID_RESET, "Use system driver" };
+    }
+    buttons[num_buttons++] = { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, ID_CANCEL, "Cancel" };
+
+    SDL_MessageBoxData data{};
+    data.flags = SDL_MESSAGEBOX_INFORMATION;
+    data.title = "GPU Driver";
+    data.message = status.c_str();
+    data.numbuttons = num_buttons;
+    data.buttons = buttons;
+
+    int buttonid = -1;
+    if (SDL_ShowMessageBox(&data, &buttonid) != 0) {
+        fprintf(stderr, "SDL_ShowMessageBox failed: %s\n", SDL_GetError());
+        return;
+    }
+
+    if (buttonid == ID_INSTALL) {
+        androidport::filedialog::request(androidport::filedialog::Kind::DriverZip,
+            [](bool ok, const std::string& payload) {
+                if (ok) {
+                    // Sucesso: avisa que o driver foi instalado E que o app
+                    // vai reiniciar para aplicá-lo. SEM o restart, o RT64
+                    // continua rodando com o driver da inicialização (ver
+                    // nota acima) e o próximo Start Game crasha.
+                    const std::string full = payload
+                        + "\n\nThe app will now restart to load the new driver.";
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
+                        "GPU Driver", full.c_str(), nullptr);
+                    request_app_restart_after_delay(800);
+                } else {
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                        "GPU Driver", payload.c_str(), nullptr);
+                }
+            });
+    } else if (buttonid == ID_RESET) {
+        dk64driver::reset_selection();
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "GPU Driver",
+            "Custom driver removed.\nThe app will now restart to load the system driver.",
+            nullptr);
+        request_app_restart_after_delay(800);
+    }
+}
+#endif
+
 void on_launcher_init(recompui::LauncherMenu *menu) {
     auto game_options_menu = menu->init_game_options_menu(
         supported_games[0].game_id,
@@ -668,6 +783,12 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     );
 
     game_options_menu->add_default_options();
+#ifdef __ANDROID__
+    // Port Android: seleção do driver Vulkan (Turnip) direto no menu do jogo.
+    game_options_menu->add_option("GPU Driver", []() {
+        show_android_gpu_driver_menu();
+    });
+#endif
     game_options_menu->set_width(30, recompui::Unit::Percent);
 
     for (auto option : game_options_menu->get_options()) {
@@ -702,6 +823,13 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
 
 int main(int argc, char** argv) {
 #ifdef __ANDROID__
+    // Visibilidade de morte nativa ANTES de qualquer outra inicialização:
+    // SIGSEGV/SIGABRT/terminate passam a registrar a causa no logcat (tag
+    // DK64Recomp-Crash) antes do fluxo padrão de morte do Android — sem
+    // isto, um crash nativo ou uma exceção não capturada fecha o app sem
+    // nenhuma linha diagnosticável (relato "o app fecha sem nada no log").
+    androidport::crash::install();
+
     // Diretórios do app passados pelo MainActivity (SDLActivity::getArguments()).
     androidport::init_from_args(argc, argv);
     // RT64::UserPaths::detectDataPath (src/common/rt64_user_paths.cpp do rt64)
@@ -880,6 +1008,22 @@ int main(int argc, char** argv) {
         .set_rumble = recompinput::set_rumble,
         .get_connected_device_info = get_connected_device_info,
     };
+
+#ifdef __ANDROID__
+    // Gamepad virtual (overlay de toque Android): além do input dos controles
+    // físicos/teclado, mescla o estado do pad de toque no input N64 e avisa o
+    // overlay Java quando o jogo inicia (para exibir os controles na tela).
+    // Ver android/native/compat/virtual_pad.cpp.
+    input_callbacks.poll_input = []() {
+        recompinput::poll_inputs();
+        androidport::virtualpad::notify_game_started(ultramodern::is_game_started());
+    };
+    input_callbacks.get_input = [](int controller_num, uint16_t* buttons, float* x, float* y) {
+        bool ret = recompinput::profiles::get_n64_input(controller_num, buttons, x, y);
+        androidport::virtualpad::merge_input(controller_num, buttons, x, y);
+        return ret;
+    };
+#endif
 
     ultramodern::events::callbacks_t thread_callbacks{
         .vi_callback = recompinput::update_rumble,

@@ -60,6 +60,17 @@ void set_runtime_paths(const char* internal_dir, const char* native_lib_dir) {
     }
 }
 
+void set_native_library_dir(const char* native_lib_dir) {
+    // Somente g_native_lib_dir (veja android_paths.h): nenhum outro caminho de
+    // execução escreve este global durante o startup, logo não há corrida com
+    // a SDLThread (init_from_args) que já pode estar rodando em paralelo no
+    // onCreate. É o hookLibDir em contrato exigido pelo libadrenotools.
+    if (native_lib_dir && native_lib_dir[0]) {
+        g_native_lib_dir = native_lib_dir;
+        ALOGI("paths (JNI): nativeLibraryDir=%s (onCreate)", native_lib_dir);
+    }
+}
+
 /*
  * Pipa o stderr do processo para o logcat. O plume/RT64 reportam falhas de
  * vídeo via fprintf(stderr) ("Unable to find devices that support Vulkan.",

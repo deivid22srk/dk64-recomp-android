@@ -1,5 +1,7 @@
 plugins {
     id("com.android.application")
+    // Kotlin para o overlay do gamepad virtual (VirtualPadView.kt).
+    id("org.jetbrains.kotlin.android")
 }
 
 // Caminho opcional para o binário file_to_c pré-compilado no host (necessário no CI).
@@ -15,8 +17,8 @@ android {
         applicationId = "com.deivid22srk.dk64recomp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.1-android"
+        versionCode = 4
+        versionName = "1.0.3-android"
 
         ndk {
             // 64-bit apenas (decisão do usuário: memória e tempo de build)
